@@ -1,14 +1,14 @@
-import Database from 'better-sqlite3';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import Database from "better-sqlite3";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const db = new Database(join(__dirname, 'database.sqlite'));
+const db = new Database(join(__dirname, "database.sqlite"));
 
 // Enable foreign keys
-db.pragma('foreign_keys = ON');
+db.pragma("foreign_keys = ON");
 
 // Create tables
 db.exec(`
@@ -75,31 +75,48 @@ db.exec(`
 
 // Migration: add portions and recipe columns if they don't exist (existing DBs)
 const menuTableInfo = db.prepare("PRAGMA table_info(menu_items)").all();
-const hasPortions = menuTableInfo.some((col) => col.name === 'portions');
-const hasRecipe = menuTableInfo.some((col) => col.name === 'recipe');
+const hasPortions = menuTableInfo.some((col) => col.name === "portions");
+const hasRecipe = menuTableInfo.some((col) => col.name === "recipe");
 if (!hasPortions) {
-  db.exec('ALTER TABLE menu_items ADD COLUMN portions INTEGER NOT NULL DEFAULT 1');
+  db.exec(
+    "ALTER TABLE menu_items ADD COLUMN portions INTEGER NOT NULL DEFAULT 1",
+  );
 }
 if (!hasRecipe) {
-  db.exec("ALTER TABLE menu_items ADD COLUMN recipe TEXT NOT NULL DEFAULT '[]'");
+  db.exec(
+    "ALTER TABLE menu_items ADD COLUMN recipe TEXT NOT NULL DEFAULT '[]'",
+  );
 }
 
 // Migration: add snapshot columns to order_items table
 const orderItemsTableInfo = db.prepare("PRAGMA table_info(order_items)").all();
-const hasName = orderItemsTableInfo.some((col) => col.name === 'name');
-const hasDescription = orderItemsTableInfo.some((col) => col.name === 'description');
-const hasPrice = orderItemsTableInfo.some((col) => col.name === 'price');
-const hasCategory = orderItemsTableInfo.some((col) => col.name === 'category');
-const hasType = orderItemsTableInfo.some((col) => col.name === 'type');
+const hasName = orderItemsTableInfo.some((col) => col.name === "name");
+const hasDescription = orderItemsTableInfo.some(
+  (col) => col.name === "description",
+);
+const hasPrice = orderItemsTableInfo.some((col) => col.name === "price");
+const hasCategory = orderItemsTableInfo.some((col) => col.name === "category");
+const hasType = orderItemsTableInfo.some((col) => col.name === "type");
 
 if (!hasName || !hasDescription || !hasPrice || !hasCategory || !hasType) {
   // For existing databases, we need to migrate data from menu_items
   // First add the columns if they don't exist
-  if (!hasName) db.exec("ALTER TABLE order_items ADD COLUMN name TEXT NOT NULL DEFAULT ''");
-  if (!hasDescription) db.exec("ALTER TABLE order_items ADD COLUMN description TEXT NOT NULL DEFAULT ''");
-  if (!hasPrice) db.exec("ALTER TABLE order_items ADD COLUMN price REAL NOT NULL DEFAULT 0");
-  if (!hasCategory) db.exec("ALTER TABLE order_items ADD COLUMN category TEXT NOT NULL DEFAULT ''");
-  if (!hasType) db.exec("ALTER TABLE order_items ADD COLUMN type TEXT NOT NULL DEFAULT 'comida'");
+  if (!hasName)
+    db.exec("ALTER TABLE order_items ADD COLUMN name TEXT NOT NULL DEFAULT ''");
+  if (!hasDescription)
+    db.exec(
+      "ALTER TABLE order_items ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+    );
+  if (!hasPrice)
+    db.exec("ALTER TABLE order_items ADD COLUMN price REAL NOT NULL DEFAULT 0");
+  if (!hasCategory)
+    db.exec(
+      "ALTER TABLE order_items ADD COLUMN category TEXT NOT NULL DEFAULT ''",
+    );
+  if (!hasType)
+    db.exec(
+      "ALTER TABLE order_items ADD COLUMN type TEXT NOT NULL DEFAULT 'comida'",
+    );
 
   // Populate the new columns from menu_items for existing records
   db.exec(`
@@ -115,7 +132,7 @@ if (!hasName || !hasDescription || !hasPrice || !hasCategory || !hasType) {
 }
 
 // Initialize default menu items if table is empty
-const menuCount = db.prepare('SELECT COUNT(*) as count FROM menu_items').get();
+const menuCount = db.prepare("SELECT COUNT(*) as count FROM menu_items").get();
 if (menuCount.count === 0) {
   const insertMenu = db.prepare(`
     INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe)
@@ -123,20 +140,118 @@ if (menuCount.count === 0) {
   `);
 
   const defaultMenuItems = [
-    ['1', 'Pizza Margherita', 'Tomates frescos, mozzarella, albahaca', 18.00, 'Principales', 'comida', 1, 1, 1, '[]'],
-    ['2', 'Ensalada César', 'Lechuga romana, parmesano, crutones, aderezo césar', 14.00, 'Entradas', 'comida', 1, 0, 1, '[]'],
-    ['3', 'Salmón a la Plancha', 'Salmón atlántico, vegetales de temporada, mantequilla de limón', 32.00, 'Principales', 'comida', 1, 1, 1, '[]'],
-    ['4', 'Pasta Carbonara', 'Espagueti, panceta, huevo, parmesano', 22.00, 'Principales', 'comida', 1, 0, 4, '[]'],
-    ['5', 'Tiramisú', 'Postre italiano clásico con mascarpone', 9.00, 'Postres', 'comida', 1, 0, 8, '[]'],
-    ['6', 'Bistec de Res', 'Corte premium 12oz, mantequilla de hierbas, papas asadas', 48.00, 'Principales', 'comida', 0, 0, 1, '[]'],
-    ['7', 'Papas Trufadas', 'Papas a mano, aceite de trufa, parmesano', 12.00, 'Acompañamientos', 'comida', 1, 0, 1, '[]'],
-    ['8', 'Risotto de Hongos', 'Arroz arborio, hongos silvestres, vino blanco', 24.00, 'Principales', 'comida', 1, 0, 1, '[]'],
-    ['9', 'Vino de la Casa', 'Tinto o blanco, por copa', 10.00, 'Bebidas', 'bebida', 1, 0, 1, '[]'],
-    ['10', 'Volcán de Chocolate', 'Pastel de chocolate caliente con helado de vainilla', 11.00, 'Postres', 'comida', 1, 1, 1, '[]'],
-    ['11', 'Cerveza Artesanal', 'Selección de cervezas locales', 8.00, 'Bebidas', 'bebida', 1, 0, 1, '[]'],
-    ['12', 'Margarita', 'Tequila, triple sec, limón fresco', 12.00, 'Bebidas', 'bebida', 1, 1, 1, '[]'],
-    ['13', 'Mojito', 'Ron, menta, limón, agua mineral', 11.00, 'Bebidas', 'bebida', 1, 0, 1, '[]'],
-    ['14', 'Café Americano', 'Café recién molido', 4.00, 'Bebidas', 'bebida', 1, 0, 1, '[]'],
+    // bebidas
+    [
+      "1",
+      "Fernet con coca (500ml)",
+      "Fernet Branca",
+      9000,
+      "bebidas",
+      "bebida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
+    [
+      "2",
+      "Fernet con coca (500ml)",
+      "Fernet Branca",
+      14000,
+      "bebidas",
+      "bebida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
+    [
+      "3",
+      "Gin tonic",
+      "Gin Beefeater con limón y agua tónica",
+      9000,
+      "bebidas",
+      "bebida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
+    [
+      "4",
+      "Vermut",
+      "Cinzano con soda",
+      8000,
+      "bebidas",
+      "bebida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
+    ["5", "Vaso de vino", "Malbec", 7000, "bebidas", "bebida", 1, 0, 1, "[]"],
+    [
+      "6",
+      "Limonada Boston",
+      "Con menta y jengibre",
+      6000,
+      "bebidas",
+      "bebida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
+
+    // comida
+    [
+      "7",
+      "Empanadas de carne",
+      "Dos unidades",
+      6000,
+      "comida",
+      "comida",
+      1,
+      0,
+      2,
+      "[]",
+    ],
+    [
+      "8",
+      "Fainá",
+      "Con pesto, cebolla caramelizada y cherries confitados",
+      6000,
+      "comida",
+      "comida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
+    [
+      "9",
+      "Croquetas de pescado y salsa blanca",
+      "Con mayonesa cítrica y polvo de aceitunas",
+      8000,
+      "comida",
+      "comida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
+    [
+      "10",
+      "Sanguche de milanesa de pollo",
+      "Con lechuga, mayonesa cítrica, pesto y cebolla caramelizada",
+      10000,
+      "comida",
+      "comida",
+      1,
+      0,
+      1,
+      "[]",
+    ],
   ];
 
   const insertMany = db.transaction((items) => {
