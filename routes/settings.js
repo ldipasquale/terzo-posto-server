@@ -7,7 +7,7 @@ const router = express.Router();
 router.get('/mercado-pago', (req, res) => {
   try {
     const accounts = db.prepare(`
-      SELECT id, holder, alias, is_default
+      SELECT id, holder, alias, is_default, active
       FROM mercado_pago_accounts
       ORDER BY is_default DESC, created_at ASC
     `).all();
@@ -16,7 +16,8 @@ router.get('/mercado-pago', (req, res) => {
       id: account.id,
       holder: account.holder,
       alias: account.alias,
-      isDefault: Boolean(account.is_default)
+      isDefault: Boolean(account.is_default),
+      active: Boolean(account.active)
     }));
 
     res.json(formattedAccounts);
@@ -29,7 +30,7 @@ router.get('/mercado-pago', (req, res) => {
 // Create Mercado Pago account
 router.post('/mercado-pago', (req, res) => {
   try {
-    const { holder, alias, isDefault } = req.body;
+    const { holder, alias, isDefault, active } = req.body;
 
     if (!holder || !alias) {
       return res.status(400).json({ error: 'Titular y alias son requeridos' });
@@ -50,14 +51,14 @@ router.post('/mercado-pago', (req, res) => {
     const shouldBeDefault = isDefault || db.prepare('SELECT COUNT(*) as count FROM mercado_pago_accounts').get().count === 0;
 
     const insertAccount = db.prepare(`
-      INSERT INTO mercado_pago_accounts (id, holder, alias, is_default)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO mercado_pago_accounts (id, holder, alias, is_default, active)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
-    insertAccount.run(accountId, holder, alias, shouldBeDefault ? 1 : 0);
+    insertAccount.run(accountId, holder, alias, shouldBeDefault ? 1 : 0, active !== false ? 1 : 0);
 
     const account = db.prepare(`
-      SELECT id, holder, alias, is_default
+      SELECT id, holder, alias, is_default, active
       FROM mercado_pago_accounts
       WHERE id = ?
     `).get(accountId);
@@ -66,7 +67,8 @@ router.post('/mercado-pago', (req, res) => {
       id: account.id,
       holder: account.holder,
       alias: account.alias,
-      isDefault: Boolean(account.is_default)
+      isDefault: Boolean(account.is_default),
+      active: Boolean(account.active)
     });
   } catch (error) {
     console.error('Error creating Mercado Pago account:', error);
@@ -77,7 +79,7 @@ router.post('/mercado-pago', (req, res) => {
 // Update Mercado Pago account
 router.put('/mercado-pago/:id', (req, res) => {
   try {
-    const { holder, alias, isDefault } = req.body;
+    const { holder, alias, isDefault, active } = req.body;
 
     // If setting as default, unset other defaults
     if (isDefault) {
@@ -85,8 +87,8 @@ router.put('/mercado-pago/:id', (req, res) => {
     }
 
     const updateAccount = db.prepare(`
-      UPDATE mercado_pago_accounts 
-      SET holder = ?, alias = ?, is_default = ?
+      UPDATE mercado_pago_accounts
+      SET holder = ?, alias = ?, is_default = ?, active = ?
       WHERE id = ?
     `);
 
@@ -94,6 +96,7 @@ router.put('/mercado-pago/:id', (req, res) => {
       holder,
       alias,
       isDefault ? 1 : 0,
+      active !== false ? 1 : 0,
       req.params.id
     );
 
@@ -102,7 +105,7 @@ router.put('/mercado-pago/:id', (req, res) => {
     }
 
     const account = db.prepare(`
-      SELECT id, holder, alias, is_default
+      SELECT id, holder, alias, is_default, active
       FROM mercado_pago_accounts
       WHERE id = ?
     `).get(req.params.id);
@@ -111,7 +114,8 @@ router.put('/mercado-pago/:id', (req, res) => {
       id: account.id,
       holder: account.holder,
       alias: account.alias,
-      isDefault: Boolean(account.is_default)
+      isDefault: Boolean(account.is_default),
+      active: Boolean(account.active)
     });
   } catch (error) {
     console.error('Error updating Mercado Pago account:', error);

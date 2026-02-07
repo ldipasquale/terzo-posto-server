@@ -3,10 +3,66 @@ import db from '../database.js';
 
 const router = express.Router();
 
-// Get all orders
+// Get all orders with optional filtering
 router.get('/', (req, res) => {
   try {
-    const orders = db.prepare(`
+    const { dateFrom, dateTo, status, paymentMethod, mercadoPagoAccountId, type, productSearch } = req.query;
+
+    // Build WHERE clause dynamically based on filters
+    const whereClauses = [];
+    const params = [];
+
+    // Date filtering
+    if (dateFrom) {
+      whereClauses.push('o.created_at >= ?');
+      params.push(dateFrom);
+    }
+    if (dateTo) {
+      whereClauses.push('o.created_at <= ?');
+      params.push(dateTo);
+    }
+
+    // Status filtering
+    if (status) {
+      whereClauses.push('o.status = ?');
+      params.push(status);
+    }
+
+    // Payment method filtering
+    if (paymentMethod) {
+      whereClauses.push('o.payment_method = ?');
+      params.push(paymentMethod);
+
+      // If filtering by mercadopago, optionally filter by specific account
+      if (paymentMethod === 'mercadopago' && mercadoPagoAccountId) {
+        whereClauses.push('o.mercado_pago_account_id = ?');
+        params.push(mercadoPagoAccountId);
+      }
+    }
+
+    // Type filtering (requires checking order items)
+    if (type && type !== 'todos') {
+      whereClauses.push(`EXISTS (
+        SELECT 1 FROM order_items oi2
+        WHERE oi2.order_id = o.id AND oi2.type = ?
+      )`);
+      params.push(type);
+    }
+
+    // Product search filtering (case-insensitive search on menu item name)
+    if (productSearch) {
+      whereClauses.push(`EXISTS (
+        SELECT 1 FROM order_items oi3
+        WHERE oi3.order_id = o.id AND oi3.name LIKE ?
+      )`);
+      params.push(`%${productSearch}%`);
+    }
+
+    const whereClause = whereClauses.length > 0
+      ? 'WHERE ' + whereClauses.join(' AND ')
+      : '';
+
+    const query = `
       SELECT
         o.*,
         GROUP_CONCAT(
@@ -26,9 +82,12 @@ router.get('/', (req, res) => {
         ) as items_json
       FROM orders o
       LEFT JOIN order_items oi ON o.id = oi.order_id
+      ${whereClause}
       GROUP BY o.id
       ORDER BY o.created_at DESC
-    `).all();
+    `;
+
+    const orders = db.prepare(query).all(...params);
 
     const formattedOrders = orders.map(order => {
       const items = order.items_json
@@ -47,6 +106,9 @@ router.get('/', (req, res) => {
         status: order.status,
         paymentMethod: order.payment_method,
         mercadoPagoAccountId: order.mercado_pago_account_id || undefined,
+        discount: order.discount || undefined,
+        discountReason: order.discount_reason || undefined,
+        notes: order.notes || undefined,
         createdAt: new Date(order.created_at + 'Z').toISOString()
       };
     });
@@ -106,6 +168,9 @@ router.get('/:id', (req, res) => {
       status: order.status,
       paymentMethod: order.payment_method,
       mercadoPagoAccountId: order.mercado_pago_account_id || undefined,
+      discount: order.discount || undefined,
+      discountReason: order.discount_reason || undefined,
+      notes: order.notes || undefined,
       createdAt: new Date(order.created_at + 'Z').toISOString()
     };
 
@@ -119,7 +184,7 @@ router.get('/:id', (req, res) => {
 // Create new order (order id and counter updated in one transaction)
 router.post('/', (req, res) => {
   try {
-    const { customerName, items, total, status, paymentMethod, mercadoPagoAccountId } = req.body;
+    const { customerName, items, total, status, paymentMethod, mercadoPagoAccountId, discount, discountReason, notes } = req.body;
 
     if (!customerName || !items || !Array.isArray(items) || items.length === 0 || total === undefined) {
       return res.status(400).json({ error: 'Datos del pedido incompletos' });
@@ -131,8 +196,8 @@ router.post('/', (req, res) => {
       "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP"
     );
     const insertOrder = db.prepare(`
-      INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, discount, discount_reason, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertOrderItem = db.prepare(`
       INSERT INTO order_items (order_id, menu_item_id, name, description, price, category, type, quantity, notes)
@@ -159,7 +224,10 @@ router.post('/', (req, res) => {
         total,
         status || 'pending',
         paymentMethod || 'efectivo',
-        mercadoPagoAccountId || null
+        mercadoPagoAccountId || null,
+        discount || null,
+        discountReason || null,
+        notes || null
       );
 
       for (const item of items) {
@@ -221,6 +289,9 @@ router.post('/', (req, res) => {
       status: order.status,
       paymentMethod: order.payment_method,
       mercadoPagoAccountId: order.mercado_pago_account_id || undefined,
+      discount: order.discount || undefined,
+      discountReason: order.discount_reason || undefined,
+      notes: order.notes || undefined,
       createdAt: new Date(order.created_at + 'Z').toISOString()
     };
 
@@ -294,6 +365,9 @@ router.patch('/:id/status', (req, res) => {
       status: order.status,
       paymentMethod: order.payment_method,
       mercadoPagoAccountId: order.mercado_pago_account_id || undefined,
+      discount: order.discount || undefined,
+      discountReason: order.discount_reason || undefined,
+      notes: order.notes || undefined,
       createdAt: new Date(order.created_at + 'Z').toISOString()
     };
 

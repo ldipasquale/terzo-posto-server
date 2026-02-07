@@ -5,8 +5,14 @@ import { dirname, join } from "path";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const db = new Database(join(__dirname, "database.sqlite"));
+const DB_PATH =
+  process.env.NODE_ENV === "production"
+    ? "/data/database.sqlite"
+    : join(__dirname, "database.sqlite");
+const db = new Database(DB_PATH);
 
+db.pragma("journal_mode = WAL");
+db.pragma("synchronous = NORMAL");
 // Enable foreign keys
 db.pragma("foreign_keys = ON");
 
@@ -36,6 +42,9 @@ db.exec(`
     status TEXT NOT NULL CHECK(status IN ('pending', 'preparing', 'ready', 'delivered')),
     payment_method TEXT NOT NULL CHECK(payment_method IN ('efectivo', 'mercadopago')),
     mercado_pago_account_id TEXT,
+    discount REAL,
+    discount_reason TEXT,
+    notes TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (mercado_pago_account_id) REFERENCES mercado_pago_accounts(id)
@@ -62,6 +71,7 @@ db.exec(`
     holder TEXT NOT NULL,
     alias TEXT NOT NULL,
     is_default INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -129,6 +139,35 @@ if (!hasName || !hasDescription || !hasPrice || !hasCategory || !hasType) {
       type = (SELECT type FROM menu_items WHERE id = order_items.menu_item_id)
     WHERE menu_item_id IN (SELECT id FROM menu_items)
   `);
+}
+
+// Migration: add active column to mercado_pago_accounts if it doesn't exist
+const mercadoPagoTableInfo = db
+  .prepare("PRAGMA table_info(mercado_pago_accounts)")
+  .all();
+const hasActive = mercadoPagoTableInfo.some((col) => col.name === "active");
+if (!hasActive) {
+  db.exec(
+    "ALTER TABLE mercado_pago_accounts ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+  );
+}
+
+// Migration: add discount, discount_reason, and notes columns to orders if they don't exist
+const ordersTableInfo = db.prepare("PRAGMA table_info(orders)").all();
+const hasDiscount = ordersTableInfo.some((col) => col.name === "discount");
+const hasDiscountReason = ordersTableInfo.some(
+  (col) => col.name === "discount_reason",
+);
+const hasNotes = ordersTableInfo.some((col) => col.name === "notes");
+
+if (!hasDiscount) {
+  db.exec("ALTER TABLE orders ADD COLUMN discount REAL");
+}
+if (!hasDiscountReason) {
+  db.exec("ALTER TABLE orders ADD COLUMN discount_reason TEXT");
+}
+if (!hasNotes) {
+  db.exec("ALTER TABLE orders ADD COLUMN notes TEXT");
 }
 
 // Initialize default menu items if table is empty

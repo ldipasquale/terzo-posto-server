@@ -1,3 +1,28 @@
-[mounts]
-  source = "data"
-  destination = "/data"
+# fly.toml app configuration file generated for server-summer-meadow-5029 on 2026-02-05T21:27:11-03:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'server-summer-meadow-5029'
+primary_region = 'gru'
+
+[build]
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  max_machines_running = 1
+  processes = ['app']
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
