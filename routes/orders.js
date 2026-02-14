@@ -38,6 +38,7 @@ function formatOrder(order) {
     status: order.status,
     paymentMethod: order.payment_method,
     mercadoPagoAccountId: order.mercado_pago_account_id || undefined,
+    cashRegisterId: order.cash_register_id || undefined,
     discount: order.discount != null ? Number(order.discount) : undefined,
     discountReason: order.discount_reason || undefined,
     notes: order.notes || undefined,
@@ -48,18 +49,23 @@ function formatOrder(order) {
 // Get all orders with optional filtering
 router.get('/', async (req, res) => {
   try {
-    const { dateFrom, dateTo, status, paymentMethod, mercadoPagoAccountId, type, productSearch } = req.query;
+    const { dateFrom, dateTo, status, paymentMethod, mercadoPagoAccountId, cashRegisterId, type, productSearch } = req.query;
 
     const whereClauses = [];
     const params = [];
     let paramIndex = 1;
 
+    if (cashRegisterId) {
+      whereClauses.push(`o.cash_register_id = $${paramIndex++}`);
+      params.push(cashRegisterId);
+    }
     if (dateFrom) {
-      whereClauses.push(`o.created_at >= $${paramIndex++}`);
+      whereClauses.push(`o.created_at >= $${paramIndex++}::timestamp`);
       params.push(dateFrom);
     }
     if (dateTo) {
-      whereClauses.push(`o.created_at <= $${paramIndex++}`);
+      // Inclusive: include the full day of dateTo (created_at < dateTo date + 1 day)
+      whereClauses.push(`o.created_at < ($${paramIndex++}::timestamp::date + interval '1 day')`);
       params.push(dateTo);
     }
     if (status) {
@@ -130,7 +136,7 @@ router.get('/:id', async (req, res) => {
 // Create new order
 router.post('/', async (req, res) => {
   try {
-    const { customerName, items, total, status, paymentMethod, mercadoPagoAccountId, discount, discountReason, notes } = req.body;
+    const { customerName, items, total, status, paymentMethod, mercadoPagoAccountId, cashRegisterId, discount, discountReason, notes } = req.body;
 
     if (!customerName || !items || !Array.isArray(items) || items.length === 0 || total === undefined) {
       return res.status(400).json({ error: 'Datos del pedido incompletos' });
@@ -160,8 +166,8 @@ router.post('/', async (req, res) => {
       );
 
       await client.query(
-        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, discount, discount_reason, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, cash_register_id, discount, discount_reason, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           orderId,
           customerName,
@@ -169,6 +175,7 @@ router.post('/', async (req, res) => {
           status || 'pending',
           paymentMethod || 'efectivo',
           mercadoPagoAccountId || null,
+          cashRegisterId || null,
           discount ?? null,
           discountReason ?? null,
           notes ?? null,

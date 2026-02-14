@@ -36,6 +36,18 @@ const CREATE_TABLES = `
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS cash_registers (
+    id TEXT PRIMARY KEY,
+    date DATE NOT NULL,
+    mercado_pago_account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
+    event_name TEXT,
+    starting_cash DOUBLE PRECISION,
+    status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMP,
+    closing_data JSONB
+  );
+
   CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY,
     customer_name TEXT NOT NULL,
@@ -43,6 +55,7 @@ const CREATE_TABLES = `
     status TEXT NOT NULL CHECK (status IN ('pending', 'preparing', 'ready', 'delivered')),
     payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
     mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+    cash_register_id TEXT REFERENCES cash_registers(id),
     discount DOUBLE PRECISION,
     discount_reason TEXT,
     notes TEXT,
@@ -148,6 +161,32 @@ async function initDb() {
     }
     if (!ordersColNames.includes("notes")) {
       await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT");
+    }
+
+    const cashRegistersExists = (
+      await client.query(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = 'cash_registers'"
+      )
+    ).rows.length > 0;
+    if (!cashRegistersExists) {
+      await client.query(`
+        CREATE TABLE cash_registers (
+          id TEXT PRIMARY KEY,
+          date DATE NOT NULL,
+          mercado_pago_account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
+          event_name TEXT,
+          starting_cash DOUBLE PRECISION,
+          status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          closed_at TIMESTAMP,
+          closing_data JSONB
+        )
+      `);
+    }
+    if (!ordersColNames.includes("cash_register_id")) {
+      await client.query(
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_register_id TEXT REFERENCES cash_registers(id)"
+      );
     }
 
     // Seed default menu if empty

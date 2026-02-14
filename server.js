@@ -4,6 +4,7 @@ import authRoutes from './routes/auth.js';
 import ordersRoutes from './routes/orders.js';
 import menuRoutes from './routes/menu.js';
 import settingsRoutes from './routes/settings.js';
+import cashRegistersRoutes from './routes/cashRegisters.js';
 import { authenticateToken } from './middleware/auth.js';
 
 const app = express();
@@ -25,6 +26,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/orders', authenticateToken, ordersRoutes);
 app.use('/api/menu', authenticateToken, menuRoutes);
 app.use('/api/settings', authenticateToken, settingsRoutes);
+app.use('/api/cash-registers', authenticateToken, cashRegistersRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {
