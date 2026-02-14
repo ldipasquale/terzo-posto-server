@@ -1,305 +1,183 @@
-import Database from "better-sqlite3";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import pg from "pg";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const { Pool } = pg;
 
-const DB_PATH =
-  process.env.NODE_ENV === "production"
-    ? "/data/database.sqlite"
-    : join(__dirname, "database.sqlite");
-const db = new Database(DB_PATH);
+const DATABASE_URL =
+  process.env.DATABASE_URL ||
+  "postgresql://localhost:5432/terzo_posto";
 
-db.pragma("journal_mode = WAL");
-db.pragma("synchronous = NORMAL");
-// Enable foreign keys
-db.pragma("foreign_keys = ON");
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+});
 
-// Create tables
-db.exec(`
-  -- Menu items table
+// Create tables (PostgreSQL DDL)
+const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS menu_items (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
-    price REAL NOT NULL,
+    price DOUBLE PRECISION NOT NULL,
     category TEXT NOT NULL,
-    type TEXT NOT NULL CHECK(type IN ('comida', 'bebida')),
-    available INTEGER NOT NULL DEFAULT 1,
-    popular INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL CHECK (type IN ('comida', 'bebida')),
+    available SMALLINT NOT NULL DEFAULT 1,
+    popular SMALLINT NOT NULL DEFAULT 0,
     portions INTEGER NOT NULL DEFAULT 1,
     recipe TEXT NOT NULL DEFAULT '[]',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
-  -- Orders table
-  CREATE TABLE IF NOT EXISTS orders (
-    id TEXT PRIMARY KEY,
-    customer_name TEXT NOT NULL,
-    total REAL NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending', 'preparing', 'ready', 'delivered')),
-    payment_method TEXT NOT NULL CHECK(payment_method IN ('efectivo', 'mercadopago')),
-    mercado_pago_account_id TEXT,
-    discount REAL,
-    discount_reason TEXT,
-    notes TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (mercado_pago_account_id) REFERENCES mercado_pago_accounts(id)
-  );
-
-  -- Order items table (stores snapshots of menu items at order time)
-  CREATE TABLE IF NOT EXISTS order_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id TEXT NOT NULL,
-    menu_item_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL,
-    price REAL NOT NULL,
-    category TEXT NOT NULL,
-    type TEXT NOT NULL,
-    quantity INTEGER NOT NULL,
-    notes TEXT,
-    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
-  );
-
-  -- Mercado Pago accounts table
   CREATE TABLE IF NOT EXISTS mercado_pago_accounts (
     id TEXT PRIMARY KEY,
     holder TEXT NOT NULL,
     alias TEXT NOT NULL,
-    is_default INTEGER NOT NULL DEFAULT 0,
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    is_default SMALLINT NOT NULL DEFAULT 0,
+    active SMALLINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
-  -- Settings table (for future use)
+  CREATE TABLE IF NOT EXISTS orders (
+    id TEXT PRIMARY KEY,
+    customer_name TEXT NOT NULL,
+    total DOUBLE PRECISION NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'preparing', 'ready', 'delivered')),
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
+    mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+    discount DOUBLE PRECISION,
+    discount_reason TEXT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS order_items (
+    id SERIAL PRIMARY KEY,
+    order_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    menu_item_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    price DOUBLE PRECISION NOT NULL,
+    category TEXT NOT NULL,
+    type TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    notes TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
-`);
+`;
 
-// Migration: add portions and recipe columns if they don't exist (existing DBs)
-const menuTableInfo = db.prepare("PRAGMA table_info(menu_items)").all();
-const hasPortions = menuTableInfo.some((col) => col.name === "portions");
-const hasRecipe = menuTableInfo.some((col) => col.name === "recipe");
-if (!hasPortions) {
-  db.exec(
-    "ALTER TABLE menu_items ADD COLUMN portions INTEGER NOT NULL DEFAULT 1",
-  );
-}
-if (!hasRecipe) {
-  db.exec(
-    "ALTER TABLE menu_items ADD COLUMN recipe TEXT NOT NULL DEFAULT '[]'",
-  );
-}
+async function initDb() {
+  const client = await pool.connect();
+  try {
+    await client.query(CREATE_TABLES);
 
-// Migration: add snapshot columns to order_items table
-const orderItemsTableInfo = db.prepare("PRAGMA table_info(order_items)").all();
-const hasName = orderItemsTableInfo.some((col) => col.name === "name");
-const hasDescription = orderItemsTableInfo.some(
-  (col) => col.name === "description",
-);
-const hasPrice = orderItemsTableInfo.some((col) => col.name === "price");
-const hasCategory = orderItemsTableInfo.some((col) => col.name === "category");
-const hasType = orderItemsTableInfo.some((col) => col.name === "type");
-
-if (!hasName || !hasDescription || !hasPrice || !hasCategory || !hasType) {
-  // For existing databases, we need to migrate data from menu_items
-  // First add the columns if they don't exist
-  if (!hasName)
-    db.exec("ALTER TABLE order_items ADD COLUMN name TEXT NOT NULL DEFAULT ''");
-  if (!hasDescription)
-    db.exec(
-      "ALTER TABLE order_items ADD COLUMN description TEXT NOT NULL DEFAULT ''",
+    // Migrations: add columns if missing (for existing DBs)
+    const menuCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'menu_items'"
     );
-  if (!hasPrice)
-    db.exec("ALTER TABLE order_items ADD COLUMN price REAL NOT NULL DEFAULT 0");
-  if (!hasCategory)
-    db.exec(
-      "ALTER TABLE order_items ADD COLUMN category TEXT NOT NULL DEFAULT ''",
-    );
-  if (!hasType)
-    db.exec(
-      "ALTER TABLE order_items ADD COLUMN type TEXT NOT NULL DEFAULT 'comida'",
-    );
-
-  // Populate the new columns from menu_items for existing records
-  db.exec(`
-    UPDATE order_items
-    SET
-      name = (SELECT name FROM menu_items WHERE id = order_items.menu_item_id),
-      description = (SELECT description FROM menu_items WHERE id = order_items.menu_item_id),
-      price = (SELECT price FROM menu_items WHERE id = order_items.menu_item_id),
-      category = (SELECT category FROM menu_items WHERE id = order_items.menu_item_id),
-      type = (SELECT type FROM menu_items WHERE id = order_items.menu_item_id)
-    WHERE menu_item_id IN (SELECT id FROM menu_items)
-  `);
-}
-
-// Migration: add active column to mercado_pago_accounts if it doesn't exist
-const mercadoPagoTableInfo = db
-  .prepare("PRAGMA table_info(mercado_pago_accounts)")
-  .all();
-const hasActive = mercadoPagoTableInfo.some((col) => col.name === "active");
-if (!hasActive) {
-  db.exec(
-    "ALTER TABLE mercado_pago_accounts ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
-  );
-}
-
-// Migration: add discount, discount_reason, and notes columns to orders if they don't exist
-const ordersTableInfo = db.prepare("PRAGMA table_info(orders)").all();
-const hasDiscount = ordersTableInfo.some((col) => col.name === "discount");
-const hasDiscountReason = ordersTableInfo.some(
-  (col) => col.name === "discount_reason",
-);
-const hasNotes = ordersTableInfo.some((col) => col.name === "notes");
-
-if (!hasDiscount) {
-  db.exec("ALTER TABLE orders ADD COLUMN discount REAL");
-}
-if (!hasDiscountReason) {
-  db.exec("ALTER TABLE orders ADD COLUMN discount_reason TEXT");
-}
-if (!hasNotes) {
-  db.exec("ALTER TABLE orders ADD COLUMN notes TEXT");
-}
-
-// Initialize default menu items if table is empty
-const menuCount = db.prepare("SELECT COUNT(*) as count FROM menu_items").get();
-if (menuCount.count === 0) {
-  const insertMenu = db.prepare(`
-    INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  const defaultMenuItems = [
-    // bebidas
-    [
-      "1",
-      "Fernet con coca (500ml)",
-      "Fernet Branca",
-      9000,
-      "bebidas",
-      "bebida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-    [
-      "2",
-      "Fernet con coca (500ml)",
-      "Fernet Branca",
-      14000,
-      "bebidas",
-      "bebida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-    [
-      "3",
-      "Gin tonic",
-      "Gin Beefeater con limón y agua tónica",
-      9000,
-      "bebidas",
-      "bebida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-    [
-      "4",
-      "Vermut",
-      "Cinzano con soda",
-      8000,
-      "bebidas",
-      "bebida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-    ["5", "Vaso de vino", "Malbec", 7000, "bebidas", "bebida", 1, 0, 1, "[]"],
-    [
-      "6",
-      "Limonada Boston",
-      "Con menta y jengibre",
-      6000,
-      "bebidas",
-      "bebida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-
-    // comida
-    [
-      "7",
-      "Empanadas de carne",
-      "Dos unidades",
-      6000,
-      "comida",
-      "comida",
-      1,
-      0,
-      2,
-      "[]",
-    ],
-    [
-      "8",
-      "Fainá",
-      "Con pesto, cebolla caramelizada y cherries confitados",
-      6000,
-      "comida",
-      "comida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-    [
-      "9",
-      "Croquetas de pescado y salsa blanca",
-      "Con mayonesa cítrica y polvo de aceitunas",
-      8000,
-      "comida",
-      "comida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-    [
-      "10",
-      "Sanguche de milanesa de pollo",
-      "Con lechuga, mayonesa cítrica, pesto y cebolla caramelizada",
-      10000,
-      "comida",
-      "comida",
-      1,
-      0,
-      1,
-      "[]",
-    ],
-  ];
-
-  const insertMany = db.transaction((items) => {
-    for (const item of items) {
-      insertMenu.run(...item);
+    const menuColNames = menuCols.rows.map((r) => r.column_name);
+    if (!menuColNames.includes("portions")) {
+      await client.query(
+        "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS portions INTEGER NOT NULL DEFAULT 1"
+      );
     }
-  });
+    if (!menuColNames.includes("recipe")) {
+      await client.query(
+        "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS recipe TEXT NOT NULL DEFAULT '[]'"
+      );
+    }
 
-  insertMany(defaultMenuItems);
+    const orderItemsCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'order_items'"
+    );
+    const oiColNames = orderItemsCols.rows.map((r) => r.column_name);
+    const requiredOiCols = ["name", "description", "price", "category", "type"];
+    for (const col of requiredOiCols) {
+      if (!oiColNames.includes(col)) {
+        const def =
+          col === "name" || col === "description" || col === "category"
+            ? "TEXT NOT NULL DEFAULT ''"
+            : col === "price"
+              ? "DOUBLE PRECISION NOT NULL DEFAULT 0"
+              : col === "type"
+                ? "TEXT NOT NULL DEFAULT 'comida'"
+                : "";
+        if (!def) continue;
+        await client.query(
+          `ALTER TABLE order_items ADD COLUMN IF NOT EXISTS ${col} ${def}`
+        );
+      }
+    }
+    if (requiredOiCols.some((c) => !oiColNames.includes(c))) {
+      await client.query(`
+        UPDATE order_items oi
+        SET
+          name = m.name,
+          description = m.description,
+          price = m.price,
+          category = m.category,
+          type = m.type
+        FROM menu_items m
+        WHERE oi.menu_item_id = m.id
+      `);
+    }
+
+    const mpCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'mercado_pago_accounts'"
+    );
+    const mpColNames = mpCols.rows.map((r) => r.column_name);
+    if (!mpColNames.includes("active")) {
+      await client.query(
+        "ALTER TABLE mercado_pago_accounts ADD COLUMN IF NOT EXISTS active SMALLINT NOT NULL DEFAULT 1"
+      );
+    }
+
+    const ordersCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'orders'"
+    );
+    const ordersColNames = ordersCols.rows.map((r) => r.column_name);
+    if (!ordersColNames.includes("discount")) {
+      await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount DOUBLE PRECISION");
+    }
+    if (!ordersColNames.includes("discount_reason")) {
+      await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_reason TEXT");
+    }
+    if (!ordersColNames.includes("notes")) {
+      await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT");
+    }
+
+    // Seed default menu if empty
+    const menuCount = await client.query("SELECT COUNT(*)::int AS count FROM menu_items");
+    if (menuCount.rows[0].count === 0) {
+      const defaultMenuItems = [
+        ["1", "Fernet con coca (500ml)", "Fernet Branca", 9000, "bebidas", "bebida", 1, 0, 1, "[]"],
+        ["2", "Fernet con coca (500ml)", "Fernet Branca", 14000, "bebidas", "bebida", 1, 0, 1, "[]"],
+        ["3", "Gin tonic", "Gin Beefeater con limón y agua tónica", 9000, "bebidas", "bebida", 1, 0, 1, "[]"],
+        ["4", "Vermut", "Cinzano con soda", 8000, "bebidas", "bebida", 1, 0, 1, "[]"],
+        ["5", "Vaso de vino", "Malbec", 7000, "bebidas", "bebida", 1, 0, 1, "[]"],
+        ["6", "Limonada Boston", "Con menta y jengibre", 6000, "bebidas", "bebida", 1, 0, 1, "[]"],
+        ["7", "Empanadas de carne", "Dos unidades", 6000, "comida", "comida", 1, 0, 2, "[]"],
+        ["8", "Fainá", "Con pesto, cebolla caramelizada y cherries confitados", 6000, "comida", "comida", 1, 0, 1, "[]"],
+        ["9", "Croquetas de pescado y salsa blanca", "Con mayonesa cítrica y polvo de aceitunas", 8000, "comida", "comida", 1, 0, 1, "[]"],
+        ["10", "Sanguche de milanesa de pollo", "Con lechuga, mayonesa cítrica, pesto y cebolla caramelizada", 10000, "comida", "comida", 1, 0, 1, "[]"],
+      ];
+      for (const row of defaultMenuItems) {
+        await client.query(
+          `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          row
+        );
+      }
+    }
+  } finally {
+    client.release();
+  }
 }
 
-export default db;
+await initDb();
+
+export default pool;

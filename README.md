@@ -51,11 +51,12 @@ Authorization: Bearer <token>
 
 ## Database
 
-The application uses SQLite for data persistence. The database file (`database.sqlite`) is created automatically on first run.
+The application uses PostgreSQL for data persistence. Set `DATABASE_URL` to your PostgreSQL connection string (e.g. `postgresql://user:password@localhost:5432/terzo_posto`). If unset, it defaults to `postgresql://localhost:5432/terzo_posto`. Tables and default menu data are created automatically on first run.
 
 ## Environment Variables
 
 - `PORT` - Server port (default: 3001)
+- `DATABASE_URL` - PostgreSQL connection string (default: `postgresql://localhost:5432/terzo_posto`)
 - `JWT_SECRET` - Secret key for JWT tokens (default: 'terzo-posto-secret-key-change-in-production')
 
 ## Default Credentials

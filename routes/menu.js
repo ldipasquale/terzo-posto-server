@@ -14,25 +14,15 @@ function parseRecipe(recipeJson) {
 }
 
 // Get all menu items
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const items = db.prepare(`
-      SELECT 
-        id,
-        name,
-        description,
-        price,
-        category,
-        type,
-        available,
-        popular,
-        portions,
-        recipe
+    const result = await db.query(`
+      SELECT id, name, description, price, category, type, available, popular, portions, recipe
       FROM menu_items
       ORDER BY category, name
-    `).all();
+    `);
 
-    const formattedItems = items.map(item => ({
+    const formattedItems = result.rows.map((item) => ({
       id: item.id,
       name: item.name,
       description: item.description,
@@ -42,7 +32,7 @@ router.get('/', (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe)
+      recipe: parseRecipe(item.recipe),
     }));
 
     res.json(formattedItems);
@@ -53,23 +43,14 @@ router.get('/', (req, res) => {
 });
 
 // Get menu item by ID
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
-    const item = db.prepare(`
-      SELECT 
-        id,
-        name,
-        description,
-        price,
-        category,
-        type,
-        available,
-        popular,
-        portions,
-        recipe
-      FROM menu_items
-      WHERE id = ?
-    `).get(req.params.id);
+    const result = await db.query(
+      `SELECT id, name, description, price, category, type, available, popular, portions, recipe
+       FROM menu_items WHERE id = $1`,
+      [req.params.id]
+    );
+    const item = result.rows[0];
 
     if (!item) {
       return res.status(404).json({ error: 'Item del menú no encontrado' });
@@ -85,7 +66,7 @@ router.get('/:id', (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe)
+      recipe: parseRecipe(item.recipe),
     });
   } catch (error) {
     console.error('Error fetching menu item:', error);
@@ -94,7 +75,7 @@ router.get('/:id', (req, res) => {
 });
 
 // Create menu item
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const { id, name, description, price, category, type, available, popular, portions, recipe } = req.body;
 
@@ -109,28 +90,29 @@ router.post('/', (req, res) => {
     const recipeJson = Array.isArray(recipe) ? JSON.stringify(recipe) : '[]';
     const portionsNum = typeof portions === 'number' && portions >= 1 ? portions : 1;
 
-    const insertItem = db.prepare(`
-      INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    insertItem.run(
-      id,
-      name,
-      description,
-      price,
-      category,
-      type,
-      available ? 1 : 0,
-      popular ? 1 : 0,
-      portionsNum,
-      recipeJson
+    await db.query(
+      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        id,
+        name,
+        description,
+        price,
+        category,
+        type,
+        available ? 1 : 0,
+        popular ? 1 : 0,
+        portionsNum,
+        recipeJson,
+      ]
     );
 
-    const item = db.prepare(`
-      SELECT id, name, description, price, category, type, available, popular, portions, recipe
-      FROM menu_items WHERE id = ?
-    `).get(id);
+    const result = await db.query(
+      `SELECT id, name, description, price, category, type, available, popular, portions, recipe
+       FROM menu_items WHERE id = $1`,
+      [id]
+    );
+    const item = result.rows[0];
 
     res.status(201).json({
       id: item.id,
@@ -142,10 +124,10 @@ router.post('/', (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe)
+      recipe: parseRecipe(item.recipe),
     });
   } catch (error) {
-    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    if (error.code === '23505') {
       return res.status(409).json({ error: 'El ID del item ya existe' });
     }
     console.error('Error creating menu item:', error);
@@ -154,49 +136,42 @@ router.post('/', (req, res) => {
 });
 
 // Update menu item
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const { name, description, price, category, type, available, popular, portions, recipe } = req.body;
 
     const recipeJson = Array.isArray(recipe) ? JSON.stringify(recipe) : '[]';
     const portionsNum = typeof portions === 'number' && portions >= 1 ? portions : 1;
 
-    const updateItem = db.prepare(`
-      UPDATE menu_items 
-      SET name = ?,
-          description = ?,
-          price = ?,
-          category = ?,
-          type = ?,
-          available = ?,
-          popular = ?,
-          portions = ?,
-          recipe = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `);
-
-    const result = updateItem.run(
-      name,
-      description,
-      price,
-      category,
-      type,
-      available ? 1 : 0,
-      popular ? 1 : 0,
-      portionsNum,
-      recipeJson,
-      req.params.id
+    const result = await db.query(
+      `UPDATE menu_items
+       SET name = $1, description = $2, price = $3, category = $4, type = $5,
+           available = $6, popular = $7, portions = $8, recipe = $9, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $10`,
+      [
+        name,
+        description,
+        price,
+        category,
+        type,
+        available ? 1 : 0,
+        popular ? 1 : 0,
+        portionsNum,
+        recipeJson,
+        req.params.id,
+      ]
     );
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Item del menú no encontrado' });
     }
 
-    const item = db.prepare(`
-      SELECT id, name, description, price, category, type, available, popular, portions, recipe
-      FROM menu_items WHERE id = ?
-    `).get(req.params.id);
+    const itemResult = await db.query(
+      `SELECT id, name, description, price, category, type, available, popular, portions, recipe
+       FROM menu_items WHERE id = $1`,
+      [req.params.id]
+    );
+    const item = itemResult.rows[0];
 
     res.json({
       id: item.id,
@@ -208,7 +183,7 @@ router.put('/:id', (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe)
+      recipe: parseRecipe(item.recipe),
     });
   } catch (error) {
     console.error('Error updating menu item:', error);
@@ -217,25 +192,22 @@ router.put('/:id', (req, res) => {
 });
 
 // Delete menu item
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    // Check if item is used in any orders
-    const orderItemsCount = db.prepare(`
-      SELECT COUNT(*) as count 
-      FROM order_items 
-      WHERE menu_item_id = ?
-    `).get(req.params.id);
+    const countResult = await db.query(
+      `SELECT COUNT(*)::int AS count FROM order_items WHERE menu_item_id = $1`,
+      [req.params.id]
+    );
 
-    if (orderItemsCount.count > 0) {
-      return res.status(400).json({ 
-        error: 'No se puede eliminar el item porque está asociado a pedidos existentes' 
+    if (countResult.rows[0].count > 0) {
+      return res.status(400).json({
+        error: 'No se puede eliminar el item porque está asociado a pedidos existentes',
       });
     }
 
-    const deleteItem = db.prepare('DELETE FROM menu_items WHERE id = ?');
-    const result = deleteItem.run(req.params.id);
+    const result = await db.query('DELETE FROM menu_items WHERE id = $1', [req.params.id]);
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Item del menú no encontrado' });
     }
 
