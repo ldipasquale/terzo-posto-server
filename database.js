@@ -2,12 +2,13 @@ import pg from "pg";
 
 const { Pool } = pg;
 
-const DATABASE_URL =
-  process.env.DATABASE_URL ||
-  "postgresql://localhost:5432/terzo_posto";
+const DATABASE_URL = process.env.DATABASE_URL;
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
 // Create tables (PostgreSQL DDL)
@@ -90,22 +91,22 @@ async function initDb() {
 
     // Migrations: add columns if missing (for existing DBs)
     const menuCols = await client.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = 'menu_items'"
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'menu_items'",
     );
     const menuColNames = menuCols.rows.map((r) => r.column_name);
     if (!menuColNames.includes("portions")) {
       await client.query(
-        "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS portions INTEGER NOT NULL DEFAULT 1"
+        "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS portions INTEGER NOT NULL DEFAULT 1",
       );
     }
     if (!menuColNames.includes("recipe")) {
       await client.query(
-        "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS recipe TEXT NOT NULL DEFAULT '[]'"
+        "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS recipe TEXT NOT NULL DEFAULT '[]'",
       );
     }
 
     const orderItemsCols = await client.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = 'order_items'"
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'order_items'",
     );
     const oiColNames = orderItemsCols.rows.map((r) => r.column_name);
     const requiredOiCols = ["name", "description", "price", "category", "type"];
@@ -121,7 +122,7 @@ async function initDb() {
                 : "";
         if (!def) continue;
         await client.query(
-          `ALTER TABLE order_items ADD COLUMN IF NOT EXISTS ${col} ${def}`
+          `ALTER TABLE order_items ADD COLUMN IF NOT EXISTS ${col} ${def}`,
         );
       }
     }
@@ -140,34 +141,41 @@ async function initDb() {
     }
 
     const mpCols = await client.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = 'mercado_pago_accounts'"
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'mercado_pago_accounts'",
     );
     const mpColNames = mpCols.rows.map((r) => r.column_name);
     if (!mpColNames.includes("active")) {
       await client.query(
-        "ALTER TABLE mercado_pago_accounts ADD COLUMN IF NOT EXISTS active SMALLINT NOT NULL DEFAULT 1"
+        "ALTER TABLE mercado_pago_accounts ADD COLUMN IF NOT EXISTS active SMALLINT NOT NULL DEFAULT 1",
       );
     }
 
     const ordersCols = await client.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = 'orders'"
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'orders'",
     );
     const ordersColNames = ordersCols.rows.map((r) => r.column_name);
     if (!ordersColNames.includes("discount")) {
-      await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount DOUBLE PRECISION");
+      await client.query(
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount DOUBLE PRECISION",
+      );
     }
     if (!ordersColNames.includes("discount_reason")) {
-      await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_reason TEXT");
+      await client.query(
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_reason TEXT",
+      );
     }
     if (!ordersColNames.includes("notes")) {
-      await client.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT");
+      await client.query(
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT",
+      );
     }
 
-    const cashRegistersExists = (
-      await client.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'cash_registers'"
-      )
-    ).rows.length > 0;
+    const cashRegistersExists =
+      (
+        await client.query(
+          "SELECT 1 FROM information_schema.tables WHERE table_name = 'cash_registers'",
+        )
+      ).rows.length > 0;
     if (!cashRegistersExists) {
       await client.query(`
         CREATE TABLE cash_registers (
@@ -185,30 +193,142 @@ async function initDb() {
     }
     if (!ordersColNames.includes("cash_register_id")) {
       await client.query(
-        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_register_id TEXT REFERENCES cash_registers(id)"
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_register_id TEXT REFERENCES cash_registers(id)",
       );
     }
 
     // Seed default menu if empty
-    const menuCount = await client.query("SELECT COUNT(*)::int AS count FROM menu_items");
+    const menuCount = await client.query(
+      "SELECT COUNT(*)::int AS count FROM menu_items",
+    );
     if (menuCount.rows[0].count === 0) {
       const defaultMenuItems = [
-        ["1", "Fernet con coca (500ml)", "Fernet Branca", 9000, "bebidas", "bebida", 1, 0, 1, "[]"],
-        ["2", "Fernet con coca (500ml)", "Fernet Branca", 14000, "bebidas", "bebida", 1, 0, 1, "[]"],
-        ["3", "Gin tonic", "Gin Beefeater con limón y agua tónica", 9000, "bebidas", "bebida", 1, 0, 1, "[]"],
-        ["4", "Vermut", "Cinzano con soda", 8000, "bebidas", "bebida", 1, 0, 1, "[]"],
-        ["5", "Vaso de vino", "Malbec", 7000, "bebidas", "bebida", 1, 0, 1, "[]"],
-        ["6", "Limonada Boston", "Con menta y jengibre", 6000, "bebidas", "bebida", 1, 0, 1, "[]"],
-        ["7", "Empanadas de carne", "Dos unidades", 6000, "comida", "comida", 1, 0, 2, "[]"],
-        ["8", "Fainá", "Con pesto, cebolla caramelizada y cherries confitados", 6000, "comida", "comida", 1, 0, 1, "[]"],
-        ["9", "Croquetas de pescado y salsa blanca", "Con mayonesa cítrica y polvo de aceitunas", 8000, "comida", "comida", 1, 0, 1, "[]"],
-        ["10", "Sanguche de milanesa de pollo", "Con lechuga, mayonesa cítrica, pesto y cebolla caramelizada", 10000, "comida", "comida", 1, 0, 1, "[]"],
+        [
+          "1",
+          "Fernet con coca (500ml)",
+          "Fernet Branca",
+          9000,
+          "bebidas",
+          "bebida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "2",
+          "Fernet con coca (500ml)",
+          "Fernet Branca",
+          14000,
+          "bebidas",
+          "bebida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "3",
+          "Gin tonic",
+          "Gin Beefeater con limón y agua tónica",
+          9000,
+          "bebidas",
+          "bebida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "4",
+          "Vermut",
+          "Cinzano con soda",
+          8000,
+          "bebidas",
+          "bebida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "5",
+          "Vaso de vino",
+          "Malbec",
+          7000,
+          "bebidas",
+          "bebida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "6",
+          "Limonada Boston",
+          "Con menta y jengibre",
+          6000,
+          "bebidas",
+          "bebida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "7",
+          "Empanadas de carne",
+          "Dos unidades",
+          6000,
+          "comida",
+          "comida",
+          1,
+          0,
+          2,
+          "[]",
+        ],
+        [
+          "8",
+          "Fainá",
+          "Con pesto, cebolla caramelizada y cherries confitados",
+          6000,
+          "comida",
+          "comida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "9",
+          "Croquetas de pescado y salsa blanca",
+          "Con mayonesa cítrica y polvo de aceitunas",
+          8000,
+          "comida",
+          "comida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
+        [
+          "10",
+          "Sanguche de milanesa de pollo",
+          "Con lechuga, mayonesa cítrica, pesto y cebolla caramelizada",
+          10000,
+          "comida",
+          "comida",
+          1,
+          0,
+          1,
+          "[]",
+        ],
       ];
       for (const row of defaultMenuItems) {
         await client.query(
           `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-          row
+          row,
         );
       }
     }
