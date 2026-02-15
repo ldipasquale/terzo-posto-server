@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import authRoutes from './routes/auth.js';
@@ -26,6 +27,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/orders', authenticateToken, ordersRoutes);
 app.use('/api/menu', authenticateToken, menuRoutes);
 app.use('/api/settings', authenticateToken, settingsRoutes);
+app.use('/api/cash-registers', authenticateToken, cashRegistersRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {
