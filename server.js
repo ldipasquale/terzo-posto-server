@@ -8,6 +8,8 @@ import settingsRoutes from './routes/settings.js';
 import cashRegistersRoutes from './routes/cashRegisters.js';
 import { authenticateToken } from './middleware/auth.js';
 
+console.log('BOOTING...');
+console.log('PORT =', process.env.PORT);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
