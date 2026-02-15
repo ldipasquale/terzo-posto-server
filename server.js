@@ -22,14 +22,14 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Public routes
-app.use('/api/auth', authRoutes);
+// // Public routes
+// app.use('/api/auth', authRoutes);
 
-// Protected routes
-app.use('/api/orders', authenticateToken, ordersRoutes);
-app.use('/api/menu', authenticateToken, menuRoutes);
-app.use('/api/settings', authenticateToken, settingsRoutes);
-app.use('/api/cash-registers', authenticateToken, cashRegistersRoutes);
+// // Protected routes
+// app.use('/api/orders', authenticateToken, ordersRoutes);
+// app.use('/api/menu', authenticateToken, menuRoutes);
+// app.use('/api/settings', authenticateToken, settingsRoutes);
+// app.use('/api/cash-registers', authenticateToken, cashRegistersRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {
