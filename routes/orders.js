@@ -49,7 +49,8 @@ function formatOrder(order) {
 // Get all orders with optional filtering
 router.get('/', async (req, res) => {
   try {
-    const { dateFrom, dateTo, status, paymentMethod, mercadoPagoAccountId, cashRegisterId, type, productSearch } = req.query;
+    const { dateFrom, dateTo, status, paymentMethod, mercadoPagoAccountId, cashRegisterId: rawCashRegisterId, type, productSearch } = req.query;
+    const cashRegisterId = rawCashRegisterId != null ? (Array.isArray(rawCashRegisterId) ? rawCashRegisterId[0] : rawCashRegisterId) : null;
 
     const whereClauses = [];
     const params = [];
@@ -60,12 +61,11 @@ router.get('/', async (req, res) => {
       params.push(cashRegisterId);
     }
     if (dateFrom) {
-      whereClauses.push(`o.created_at >= $${paramIndex++}::timestamp`);
+      whereClauses.push(`o.created_at::date >= $${paramIndex++}::date`);
       params.push(dateFrom);
     }
     if (dateTo) {
-      // Inclusive: include the full day of dateTo (created_at < dateTo date + 1 day)
-      whereClauses.push(`o.created_at < ($${paramIndex++}::timestamp::date + interval '1 day')`);
+      whereClauses.push(`o.created_at::date <= $${paramIndex++}::date`);
       params.push(dateTo);
     }
     if (status) {
