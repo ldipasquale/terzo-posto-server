@@ -39,6 +39,9 @@ function formatOrder(order) {
     paymentMethod: order.payment_method,
     mercadoPagoAccountId: order.mercado_pago_account_id || undefined,
     cashRegisterId: order.cash_register_id || undefined,
+    openAccountId: order.open_account_id || undefined,
+    closedOpenAccountId: order.closed_open_account_id || undefined,
+    closedOpenAccountName: order.closed_open_account_name || undefined,
     discount: order.discount != null ? Number(order.discount) : undefined,
     discountReason: order.discount_reason || undefined,
     notes: order.notes || undefined,
@@ -136,10 +139,30 @@ router.get('/:id', async (req, res) => {
 // Create new order
 router.post('/', async (req, res) => {
   try {
-    const { customerName, items, total, status, paymentMethod, mercadoPagoAccountId, cashRegisterId, discount, discountReason, notes } = req.body;
+    const { customerName, items, total, status, paymentMethod, mercadoPagoAccountId, cashRegisterId, discount, discountReason, notes, openAccountId } = req.body;
 
     if (!customerName || !items || !Array.isArray(items) || items.length === 0 || total === undefined) {
       return res.status(400).json({ error: 'Datos del pedido incompletos' });
+    }
+
+    const isOpenAccount = paymentMethod === 'cuenta_abierta' || openAccountId;
+    const effectivePaymentMethod = isOpenAccount ? 'cuenta_abierta' : (paymentMethod || 'efectivo');
+    if (!['efectivo', 'mercadopago', 'cuenta_abierta'].includes(effectivePaymentMethod)) {
+      return res.status(400).json({ error: 'paymentMethod inválido' });
+    }
+
+    if (effectivePaymentMethod === 'cuenta_abierta' && !openAccountId) {
+      return res.status(400).json({ error: 'openAccountId es requerido para cuenta abierta' });
+    }
+
+    if (effectivePaymentMethod === 'cuenta_abierta' && openAccountId) {
+      const accountCheck = await db.query(
+        'SELECT id FROM open_accounts WHERE id = $1 AND status = $2',
+        [openAccountId, 'open']
+      );
+      if (accountCheck.rows.length === 0) {
+        return res.status(400).json({ error: 'Cuenta abierta no encontrada o ya cerrada' });
+      }
     }
 
     const client = await db.connect();
@@ -166,16 +189,17 @@ router.post('/', async (req, res) => {
       );
 
       await client.query(
-        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, cash_register_id, discount, discount_reason, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, cash_register_id, open_account_id, discount, discount_reason, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
         [
           orderId,
           customerName,
           total,
           status || 'pending',
-          paymentMethod || 'efectivo',
-          mercadoPagoAccountId || null,
+          effectivePaymentMethod,
+          effectivePaymentMethod === 'mercadopago' ? (mercadoPagoAccountId || null) : null,
           cashRegisterId || null,
+          effectivePaymentMethod === 'cuenta_abierta' ? openAccountId : null,
           discount ?? null,
           discountReason ?? null,
           notes ?? null,
