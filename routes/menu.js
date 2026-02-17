@@ -13,6 +13,17 @@ function parseRecipe(recipeJson) {
   }
 }
 
+/** Normalize recipe lines to { supplyId, quantity } for the frontend */
+function normalizeMenuRecipe(recipe) {
+  if (!Array.isArray(recipe)) return [];
+  return recipe
+    .filter((line) => line && (line.supplyId != null || line.supply_id != null) && line.quantity != null)
+    .map((line) => ({
+      supplyId: String(line.supplyId ?? line.supply_id),
+      quantity: Number(line.quantity),
+    }));
+}
+
 // Get all menu items
 router.get('/', async (req, res) => {
   try {
@@ -32,7 +43,7 @@ router.get('/', async (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe),
+      recipe: normalizeMenuRecipe(parseRecipe(item.recipe)),
     }));
 
     res.json(formattedItems);
@@ -66,7 +77,7 @@ router.get('/:id', async (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe),
+      recipe: normalizeMenuRecipe(parseRecipe(item.recipe)),
     });
   } catch (error) {
     console.error('Error fetching menu item:', error);
@@ -87,7 +98,8 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Tipo debe ser "comida" o "bebida"' });
     }
 
-    const recipeJson = Array.isArray(recipe) ? JSON.stringify(recipe) : '[]';
+    const recipeNormalized = Array.isArray(recipe) ? normalizeMenuRecipe(recipe) : [];
+    const recipeJson = JSON.stringify(recipeNormalized);
     const portionsNum = typeof portions === 'number' && portions >= 1 ? portions : 1;
 
     await db.query(
@@ -124,7 +136,7 @@ router.post('/', async (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe),
+      recipe: normalizeMenuRecipe(parseRecipe(item.recipe)),
     });
   } catch (error) {
     if (error.code === '23505') {
@@ -140,7 +152,8 @@ router.put('/:id', async (req, res) => {
   try {
     const { name, description, price, category, type, available, popular, portions, recipe } = req.body;
 
-    const recipeJson = Array.isArray(recipe) ? JSON.stringify(recipe) : '[]';
+    const recipeNormalized = Array.isArray(recipe) ? normalizeMenuRecipe(recipe) : [];
+    const recipeJson = JSON.stringify(recipeNormalized);
     const portionsNum = typeof portions === 'number' && portions >= 1 ? portions : 1;
 
     const result = await db.query(
@@ -183,7 +196,7 @@ router.put('/:id', async (req, res) => {
       available: Boolean(item.available),
       popular: Boolean(item.popular),
       portions: item.portions != null ? item.portions : 1,
-      recipe: parseRecipe(item.recipe),
+      recipe: normalizeMenuRecipe(parseRecipe(item.recipe)),
     });
   } catch (error) {
     console.error('Error updating menu item:', error);
