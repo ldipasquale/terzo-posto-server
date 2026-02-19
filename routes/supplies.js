@@ -25,7 +25,7 @@ function normalizeRecipeLine(line) {
   return { supplyId: String(supplyId), quantity: Number(line.quantity) };
 }
 
-function rowToSupply(row, costPerUnit = null) {
+function rowToSupply(row, costInfo = null) {
   const recipe = parseRecipe(row.recipe);
   const recipeNormalized = Array.isArray(recipe)
     ? recipe.map(normalizeRecipeLine).filter(Boolean)
@@ -41,8 +41,13 @@ function rowToSupply(row, costPerUnit = null) {
     yieldAmount: row.yield_amount != null ? Number(row.yield_amount) : undefined,
     yieldUnit: row.yield_unit ?? undefined,
   };
-  if (costPerUnit !== undefined && costPerUnit !== null) {
-    out.costPerUnit = costPerUnit;
+  if (costInfo) {
+    if (costInfo.costPerUnit !== undefined && costInfo.costPerUnit !== null) {
+      out.costPerUnit = costInfo.costPerUnit;
+    }
+    if (costInfo.totalCost !== undefined && costInfo.totalCost !== null) {
+      out.totalCost = costInfo.totalCost;
+    }
   }
   return out;
 }
@@ -67,10 +72,10 @@ function rowToSupplyInternal(row) {
 }
 
 /**
- * Compute cost per unit. Purchased: purchasePrice / purchaseQuantity.
- * Composed: sum(recipe line cost) / yieldAmount. Uses visited set for cycle detection.
+ * Compute cost info. Purchased: costPerUnit = price/quantity, totalCost = null.
+ * Composed: totalCost = sum(recipe line cost), costPerUnit = totalCost / yield (for use in recipes). Uses visited set for cycle detection.
  */
-function getSupplyCostPerUnit(supply, suppliesById, visited = new Set()) {
+function getSupplyCostInfo(supply, suppliesById, visited = new Set()) {
   if (visited.has(supply.id)) {
     throw new Error('Circular reference in supply recipe');
   }
@@ -80,21 +85,24 @@ function getSupplyCostPerUnit(supply, suppliesById, visited = new Set()) {
     if (supply.type === 'purchased') {
       const price = supply.purchase_price;
       const qty = supply.purchase_quantity;
-      if (price == null || qty == null || qty <= 0) return null;
-      return price / qty;
+      if (price == null || qty == null || qty <= 0) return { costPerUnit: null, totalCost: null };
+      return { costPerUnit: price / qty, totalCost: null };
     }
-    // composed
-    if (!supply.recipe || supply.recipe.length === 0) return null;
-    if (supply.yield_amount == null || supply.yield_amount <= 0) return null;
+    // composed: totalCost = sum of recipe; costPerUnit = totalCost / yield (so recipe quantity * costPerUnit = cost)
+    if (!supply.recipe || supply.recipe.length === 0) return { costPerUnit: null, totalCost: null };
     let total = 0;
     for (const line of supply.recipe) {
       const sub = suppliesById[line.supplyId];
-      if (!sub) return null;
-      const subCost = getSupplyCostPerUnit(sub, suppliesById, new Set(visited));
-      if (subCost == null) return null;
+      if (!sub) return { costPerUnit: null, totalCost: null };
+      const subInfo = getSupplyCostInfo(sub, suppliesById, new Set(visited));
+      if (subInfo.costPerUnit == null && subInfo.totalCost == null) return { costPerUnit: null, totalCost: null };
+      const subCost = subInfo.costPerUnit;
+      if (subCost == null) return { costPerUnit: null, totalCost: null };
       total += subCost * line.quantity;
     }
-    return total / supply.yield_amount;
+    const yieldAmount = supply.yield_amount != null && supply.yield_amount > 0 ? supply.yield_amount : null;
+    const costPerUnit = yieldAmount != null ? total / yieldAmount : null;
+    return { costPerUnit, totalCost: total };
   } finally {
     visited.delete(supply.id);
   }
@@ -114,13 +122,13 @@ router.get('/', async (req, res) => {
     }
     const items = result.rows.map((row) => {
       const supply = suppliesById[row.id];
-      let costPerUnit = null;
+      let costInfo = null;
       try {
-        costPerUnit = getSupplyCostPerUnit(supply, suppliesById);
+        costInfo = getSupplyCostInfo(supply, suppliesById);
       } catch {
         // circular
       }
-      return rowToSupply(row, costPerUnit);
+      return rowToSupply(row, costInfo);
     });
     res.json(items);
   } catch (error) {
@@ -144,14 +152,14 @@ router.get('/:id', async (req, res) => {
     if (!supply) {
       return res.status(404).json({ error: 'Insumo no encontrado' });
     }
-    let costPerUnit = null;
+    let costInfo = null;
     try {
-      costPerUnit = getSupplyCostPerUnit(supply, suppliesById);
+      costInfo = getSupplyCostInfo(supply, suppliesById);
     } catch {
       // circular
     }
     const row = all.rows.find((r) => r.id === req.params.id);
-    res.json(rowToSupply(row, costPerUnit));
+    res.json(rowToSupply(row, costInfo));
   } catch (error) {
     console.error('Error fetching supply:', error);
     res.status(500).json({ error: 'Error al obtener insumo' });
@@ -241,7 +249,7 @@ router.post('/', async (req, res) => {
     }
     suppliesById[supplyId] = candidate;
     try {
-      getSupplyCostPerUnit(candidate, suppliesById);
+      getSupplyCostInfo(candidate, suppliesById);
     } catch (err) {
       if (err.message === 'Circular reference in supply recipe') {
         return res.status(400).json({ error: 'Referencia circular en la receta' });
@@ -273,14 +281,14 @@ router.post('/', async (req, res) => {
       )
     ).rows[0];
     const supplyInternal = rowToSupplyInternal(row);
-    let costPerUnit = null;
+    let costInfo = null;
     try {
       const map = { ...suppliesById, [supplyId]: supplyInternal };
-      costPerUnit = getSupplyCostPerUnit(supplyInternal, map);
+      costInfo = getSupplyCostInfo(supplyInternal, map);
     } catch {
       // ignore
     }
-    res.status(201).json(rowToSupply(row, costPerUnit));
+    res.status(201).json(rowToSupply(row, costInfo));
   } catch (error) {
     if (error.code === '23505') {
       return res.status(409).json({ error: 'Ya existe un insumo con ese ID' });
@@ -371,7 +379,7 @@ router.put('/:id', async (req, res) => {
     }
     suppliesById[id] = candidate;
     try {
-      getSupplyCostPerUnit(candidate, suppliesById);
+      getSupplyCostInfo(candidate, suppliesById);
     } catch (err) {
       if (err.message === 'Circular reference in supply recipe') {
         return res.status(400).json({ error: 'Referencia circular en la receta' });
@@ -409,13 +417,13 @@ router.put('/:id', async (req, res) => {
     ).rows[0];
     const supplyInternal = rowToSupplyInternal(row);
     const map = { ...suppliesById, [id]: supplyInternal };
-    let costPerUnit = null;
+    let costInfo = null;
     try {
-      costPerUnit = getSupplyCostPerUnit(supplyInternal, map);
+      costInfo = getSupplyCostInfo(supplyInternal, map);
     } catch {
       // ignore
     }
-    res.json(rowToSupply(row, costPerUnit));
+    res.json(rowToSupply(row, costInfo));
   } catch (error) {
     console.error('Error updating supply:', error);
     res.status(500).json({ error: 'Error al actualizar insumo' });
@@ -472,4 +480,4 @@ router.delete('/:id', async (req, res) => {
 });
 
 export default router;
-export { getSupplyCostPerUnit, rowToSupplyInternal, parseRecipe as parseSupplyRecipe };
+export { getSupplyCostInfo, rowToSupplyInternal, parseRecipe as parseSupplyRecipe };

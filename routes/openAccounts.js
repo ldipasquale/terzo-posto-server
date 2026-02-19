@@ -123,18 +123,17 @@ router.post('/:id/close', async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      // If there's a discount, apply it to the last order of this account (for audit)
+      // If there's a discount, apply it to orders from last to first until fully applied
       const hasDiscount = discount != null && Number(discount) > 0;
-      let lastOrder = null;
+      let ordersToDiscount = [];
       if (hasDiscount && discountReason && String(discountReason).trim()) {
-        const lastOrderResult = await client.query(
+        const ordersResult = await client.query(
           `SELECT id, total, discount, discount_reason FROM orders
            WHERE open_account_id = $1
-           ORDER BY created_at DESC
-           LIMIT 1`,
+           ORDER BY created_at DESC`,
           [id]
         );
-        lastOrder = lastOrderResult.rows[0] || null;
+        ordersToDiscount = ordersResult.rows || [];
       }
 
       await client.query(
@@ -154,22 +153,33 @@ router.post('/:id/close', async (req, res) => {
         ]
       );
 
-      if (lastOrder) {
+      if (ordersToDiscount.length > 0) {
         const discountAmount = Number(discount);
-        const existingDiscount = lastOrder.discount != null ? Number(lastOrder.discount) : 0;
-        const existingReason = (lastOrder.discount_reason && String(lastOrder.discount_reason).trim()) || '';
-        const newDiscount = existingDiscount + discountAmount;
         const accountReasonPart = 'Descuento de la cuenta: ' + String(discountReason).trim();
-        const newReason = existingReason ? existingReason + ' ' + accountReasonPart : accountReasonPart;
-        const currentTotal = Number(lastOrder.total);
-        const newTotal = Math.max(0, currentTotal - discountAmount);
+        let remainingDiscount = discountAmount;
 
-        await client.query(
-          `UPDATE orders
-           SET total = $1, discount = $2, discount_reason = $3, updated_at = CURRENT_TIMESTAMP
-           WHERE id = $4`,
-          [newTotal, newDiscount, newReason, lastOrder.id]
-        );
+        for (const order of ordersToDiscount) {
+          if (remainingDiscount <= 0) break;
+
+          const currentTotal = Number(order.total);
+          const applyHere = Math.min(remainingDiscount, Math.max(0, currentTotal));
+          if (applyHere <= 0) continue;
+
+          const existingDiscount = order.discount != null ? Number(order.discount) : 0;
+          const existingReason = (order.discount_reason && String(order.discount_reason).trim()) || '';
+          const newTotal = currentTotal - applyHere;
+          const newDiscount = existingDiscount + applyHere;
+          const newReason = existingReason ? existingReason + ' ' + accountReasonPart : accountReasonPart;
+
+          await client.query(
+            `UPDATE orders
+             SET total = $1, discount = $2, discount_reason = $3, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $4`,
+            [newTotal, newDiscount, newReason, order.id]
+          );
+
+          remainingDiscount -= applyHere;
+        }
       }
 
       await client.query(
