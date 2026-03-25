@@ -223,11 +223,12 @@ async function initDb() {
       CHECK (payment_method IN ('efectivo', 'mercadopago', 'cuenta_abierta'));
     `);
 
-    const openAccountsExists = (
-      await client.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'open_accounts'",
-      )
-    ).rows.length > 0;
+    const openAccountsExists =
+      (
+        await client.query(
+          "SELECT 1 FROM information_schema.tables WHERE table_name = 'open_accounts'",
+        )
+      ).rows.length > 0;
     if (!openAccountsExists) {
       await client.query(`
         CREATE TABLE open_accounts (
@@ -246,11 +247,12 @@ async function initDb() {
       `);
     }
 
-    const suppliesExists = (
-      await client.query(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = 'supplies'",
-      )
-    ).rows.length > 0;
+    const suppliesExists =
+      (
+        await client.query(
+          "SELECT 1 FROM information_schema.tables WHERE table_name = 'supplies'",
+        )
+      ).rows.length > 0;
     if (!suppliesExists) {
       await client.query(`
         CREATE TABLE supplies (

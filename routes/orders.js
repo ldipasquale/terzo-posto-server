@@ -25,7 +25,11 @@ const orderSelectWithItems = `
 `;
 
 function formatOrder(order) {
-  const items = Array.isArray(order.items_json) ? order.items_json : (order.items_json ? JSON.parse(order.items_json) : []);
+  const items = Array.isArray(order.items_json)
+    ? order.items_json
+    : order.items_json
+      ? JSON.parse(order.items_json)
+      : [];
   return {
     id: order.id,
     customerName: order.customer_name,
@@ -52,8 +56,22 @@ function formatOrder(order) {
 // Get all orders with optional filtering
 router.get('/', async (req, res) => {
   try {
-    const { dateFrom, dateTo, status, paymentMethod, mercadoPagoAccountId, cashRegisterId: rawCashRegisterId, type, productSearch } = req.query;
-    const cashRegisterId = rawCashRegisterId != null ? (Array.isArray(rawCashRegisterId) ? rawCashRegisterId[0] : rawCashRegisterId) : null;
+    const {
+      dateFrom,
+      dateTo,
+      status,
+      paymentMethod,
+      mercadoPagoAccountId,
+      cashRegisterId: rawCashRegisterId,
+      type,
+      productSearch,
+    } = req.query;
+    const cashRegisterId =
+      rawCashRegisterId != null
+        ? Array.isArray(rawCashRegisterId)
+          ? rawCashRegisterId[0]
+          : rawCashRegisterId
+        : null;
 
     const whereClauses = [];
     const params = [];
@@ -98,7 +116,8 @@ router.get('/', async (req, res) => {
       params.push(`%${productSearch}%`);
     }
 
-    const whereClause = whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
+    const whereClause =
+      whereClauses.length > 0 ? 'WHERE ' + whereClauses.join(' AND ') : '';
 
     const query = `
       ${orderSelectWithItems}
@@ -118,11 +137,12 @@ router.get('/', async (req, res) => {
 // Get order by ID
 router.get('/:id', async (req, res) => {
   try {
-    const id = req.params.id.startsWith('#') ? req.params.id : `#${req.params.id}`;
-    const result = await db.query(
-      `${orderSelectWithItems} WHERE o.id = $1`,
-      [id]
-    );
+    const id = req.params.id.startsWith('#')
+      ? req.params.id
+      : `#${req.params.id}`;
+    const result = await db.query(`${orderSelectWithItems} WHERE o.id = $1`, [
+      id,
+    ]);
     const order = result.rows[0];
 
     if (!order) {
@@ -139,29 +159,57 @@ router.get('/:id', async (req, res) => {
 // Create new order
 router.post('/', async (req, res) => {
   try {
-    const { customerName, items, total, status, paymentMethod, mercadoPagoAccountId, cashRegisterId, discount, discountReason, notes, openAccountId } = req.body;
+    const {
+      customerName,
+      items,
+      total,
+      status,
+      paymentMethod,
+      mercadoPagoAccountId,
+      cashRegisterId,
+      discount,
+      discountReason,
+      notes,
+      openAccountId,
+    } = req.body;
 
-    if (!customerName || !items || !Array.isArray(items) || items.length === 0 || total === undefined) {
+    if (
+      !customerName ||
+      !items ||
+      !Array.isArray(items) ||
+      items.length === 0 ||
+      total === undefined
+    ) {
       return res.status(400).json({ error: 'Datos del pedido incompletos' });
     }
 
     const isOpenAccount = paymentMethod === 'cuenta_abierta' || openAccountId;
-    const effectivePaymentMethod = isOpenAccount ? 'cuenta_abierta' : (paymentMethod || 'efectivo');
-    if (!['efectivo', 'mercadopago', 'cuenta_abierta'].includes(effectivePaymentMethod)) {
+    const effectivePaymentMethod = isOpenAccount
+      ? 'cuenta_abierta'
+      : paymentMethod || 'efectivo';
+    if (
+      !['efectivo', 'mercadopago', 'cuenta_abierta'].includes(
+        effectivePaymentMethod,
+      )
+    ) {
       return res.status(400).json({ error: 'paymentMethod inválido' });
     }
 
     if (effectivePaymentMethod === 'cuenta_abierta' && !openAccountId) {
-      return res.status(400).json({ error: 'openAccountId es requerido para cuenta abierta' });
+      return res
+        .status(400)
+        .json({ error: 'openAccountId es requerido para cuenta abierta' });
     }
 
     if (effectivePaymentMethod === 'cuenta_abierta' && openAccountId) {
       const accountCheck = await db.query(
         'SELECT id FROM open_accounts WHERE id = $1 AND status = $2',
-        [openAccountId, 'open']
+        [openAccountId, 'open'],
       );
       if (accountCheck.rows.length === 0) {
-        return res.status(400).json({ error: 'Cuenta abierta no encontrada o ya cerrada' });
+        return res
+          .status(400)
+          .json({ error: 'Cuenta abierta no encontrada o ya cerrada' });
       }
     }
 
@@ -170,22 +218,28 @@ router.post('/', async (req, res) => {
     try {
       await client.query('BEGIN');
 
-      let row = (await client.query('SELECT value FROM settings WHERE key = $1', ['order_counter'])).rows[0];
+      let row = (
+        await client.query('SELECT value FROM settings WHERE key = $1', [
+          'order_counter',
+        ])
+      ).rows[0];
       let nextNum;
       if (row) {
         nextNum = parseInt(row.value, 10) + 1;
       } else {
         const maxRow = await client.query(
-          "SELECT MAX(CAST(REPLACE(id, '#', '') AS INTEGER)) AS max_id FROM orders"
+          "SELECT MAX(CAST(REPLACE(id, '#', '') AS INTEGER)) AS max_id FROM orders",
         );
-        nextNum = (maxRow.rows[0]?.max_id != null ? Number(maxRow.rows[0].max_id) : 0) + 1;
+        nextNum =
+          (maxRow.rows[0]?.max_id != null ? Number(maxRow.rows[0].max_id) : 0) +
+          1;
       }
       orderId = `#${nextNum}`;
 
       await client.query(
         `INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, CURRENT_TIMESTAMP)
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
-        ['order_counter', String(nextNum)]
+        ['order_counter', String(nextNum)],
       );
 
       await client.query(
@@ -197,13 +251,15 @@ router.post('/', async (req, res) => {
           total,
           status || 'pending',
           effectivePaymentMethod,
-          effectivePaymentMethod === 'mercadopago' ? (mercadoPagoAccountId || null) : null,
+          effectivePaymentMethod === 'mercadopago'
+            ? mercadoPagoAccountId || null
+            : null,
           cashRegisterId || null,
           effectivePaymentMethod === 'cuenta_abierta' ? openAccountId : null,
           discount ?? null,
           discountReason ?? null,
           notes ?? null,
-        ]
+        ],
       );
 
       for (const item of items) {
@@ -220,7 +276,7 @@ router.post('/', async (req, res) => {
             item.menuItem.type,
             item.quantity,
             item.notes || null,
-          ]
+          ],
         );
       }
 
@@ -232,10 +288,9 @@ router.post('/', async (req, res) => {
       client.release();
     }
 
-    const result = await db.query(
-      `${orderSelectWithItems} WHERE o.id = $1`,
-      [orderId]
-    );
+    const result = await db.query(`${orderSelectWithItems} WHERE o.id = $1`, [
+      orderId,
+    ]);
     const order = result.rows[0];
     res.status(201).json(formatOrder(order));
   } catch (error) {
@@ -247,16 +302,21 @@ router.post('/', async (req, res) => {
 // Update order status
 router.patch('/:id/status', async (req, res) => {
   try {
-    const id = req.params.id.startsWith('#') ? req.params.id : `#${req.params.id}`;
+    const id = req.params.id.startsWith('#')
+      ? req.params.id
+      : `#${req.params.id}`;
     const { status } = req.body;
 
-    if (!status || !['pending', 'preparing', 'ready', 'delivered'].includes(status)) {
+    if (
+      !status ||
+      !['pending', 'preparing', 'ready', 'delivered'].includes(status)
+    ) {
       return res.status(400).json({ error: 'Estado inválido' });
     }
 
     const result = await db.query(
       `UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
-      [status, id]
+      [status, id],
     );
 
     if (result.rowCount === 0) {
@@ -265,7 +325,7 @@ router.patch('/:id/status', async (req, res) => {
 
     const orderResult = await db.query(
       `${orderSelectWithItems} WHERE o.id = $1`,
-      [id]
+      [id],
     );
     res.json(formatOrder(orderResult.rows[0]));
   } catch (error) {
@@ -277,7 +337,9 @@ router.patch('/:id/status', async (req, res) => {
 // Delete order
 router.delete('/:id', async (req, res) => {
   try {
-    const id = req.params.id.startsWith('#') ? req.params.id : `#${req.params.id}`;
+    const id = req.params.id.startsWith('#')
+      ? req.params.id
+      : `#${req.params.id}`;
     const result = await db.query('DELETE FROM orders WHERE id = $1', [id]);
 
     if (result.rowCount === 0) {

@@ -17,7 +17,12 @@ function parseRecipe(recipeJson) {
 function normalizeMenuRecipe(recipe) {
   if (!Array.isArray(recipe)) return [];
   return recipe
-    .filter((line) => line && (line.supplyId != null || line.supply_id != null) && line.quantity != null)
+    .filter(
+      (line) =>
+        line &&
+        (line.supplyId != null || line.supply_id != null) &&
+        line.quantity != null,
+    )
     .map((line) => ({
       supplyId: String(line.supplyId ?? line.supply_id),
       quantity: Number(line.quantity),
@@ -59,7 +64,7 @@ router.get('/:id', async (req, res) => {
     const result = await db.query(
       `SELECT id, name, description, price, category, type, available, popular, portions, recipe
        FROM menu_items WHERE id = $1`,
-      [req.params.id]
+      [req.params.id],
     );
     const item = result.rows[0];
 
@@ -88,19 +93,35 @@ router.get('/:id', async (req, res) => {
 // Create menu item
 router.post('/', async (req, res) => {
   try {
-    const { id, name, description, price, category, type, available, popular, portions, recipe } = req.body;
+    const {
+      id,
+      name,
+      description,
+      price,
+      category,
+      type,
+      available,
+      popular,
+      portions,
+      recipe,
+    } = req.body;
 
-    if (!id || !name || !description || price === undefined || !category || !type) {
+    if (!id || !name || price === undefined || !category || !type) {
       return res.status(400).json({ error: 'Datos del item incompletos' });
     }
 
     if (type !== 'comida' && type !== 'bebida') {
-      return res.status(400).json({ error: 'Tipo debe ser "comida" o "bebida"' });
+      return res
+        .status(400)
+        .json({ error: 'Tipo debe ser "comida" o "bebida"' });
     }
 
-    const recipeNormalized = Array.isArray(recipe) ? normalizeMenuRecipe(recipe) : [];
+    const recipeNormalized = Array.isArray(recipe)
+      ? normalizeMenuRecipe(recipe)
+      : [];
     const recipeJson = JSON.stringify(recipeNormalized);
-    const portionsNum = typeof portions === 'number' && portions >= 1 ? portions : 1;
+    const portionsNum =
+      typeof portions === 'number' && portions >= 1 ? portions : 1;
 
     await db.query(
       `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe)
@@ -116,13 +137,13 @@ router.post('/', async (req, res) => {
         popular ? 1 : 0,
         portionsNum,
         recipeJson,
-      ]
+      ],
     );
 
     const result = await db.query(
       `SELECT id, name, description, price, category, type, available, popular, portions, recipe
        FROM menu_items WHERE id = $1`,
-      [id]
+      [id],
     );
     const item = result.rows[0];
 
@@ -150,11 +171,24 @@ router.post('/', async (req, res) => {
 // Update menu item
 router.put('/:id', async (req, res) => {
   try {
-    const { name, description, price, category, type, available, popular, portions, recipe } = req.body;
+    const {
+      name,
+      description,
+      price,
+      category,
+      type,
+      available,
+      popular,
+      portions,
+      recipe,
+    } = req.body;
 
-    const recipeNormalized = Array.isArray(recipe) ? normalizeMenuRecipe(recipe) : [];
+    const recipeNormalized = Array.isArray(recipe)
+      ? normalizeMenuRecipe(recipe)
+      : [];
     const recipeJson = JSON.stringify(recipeNormalized);
-    const portionsNum = typeof portions === 'number' && portions >= 1 ? portions : 1;
+    const portionsNum =
+      typeof portions === 'number' && portions >= 1 ? portions : 1;
 
     const result = await db.query(
       `UPDATE menu_items
@@ -172,7 +206,7 @@ router.put('/:id', async (req, res) => {
         portionsNum,
         recipeJson,
         req.params.id,
-      ]
+      ],
     );
 
     if (result.rowCount === 0) {
@@ -182,7 +216,7 @@ router.put('/:id', async (req, res) => {
     const itemResult = await db.query(
       `SELECT id, name, description, price, category, type, available, popular, portions, recipe
        FROM menu_items WHERE id = $1`,
-      [req.params.id]
+      [req.params.id],
     );
     const item = itemResult.rows[0];
 
@@ -209,16 +243,19 @@ router.delete('/:id', async (req, res) => {
   try {
     const countResult = await db.query(
       `SELECT COUNT(*)::int AS count FROM order_items WHERE menu_item_id = $1`,
-      [req.params.id]
+      [req.params.id],
     );
 
     if (countResult.rows[0].count > 0) {
       return res.status(400).json({
-        error: 'No se puede eliminar el item porque está asociado a pedidos existentes',
+        error:
+          'No se puede eliminar el item porque está asociado a pedidos existentes',
       });
     }
 
-    const result = await db.query('DELETE FROM menu_items WHERE id = $1', [req.params.id]);
+    const result = await db.query('DELETE FROM menu_items WHERE id = $1', [
+      req.params.id,
+    ]);
 
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Item del menú no encontrado' });
