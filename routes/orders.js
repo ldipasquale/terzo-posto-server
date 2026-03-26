@@ -1,5 +1,6 @@
 import express from 'express';
 import db from '../database.js';
+import { getUnitCostsForMenuItemIds } from '../lib/menuItemCost.js';
 
 const router = express.Router();
 
@@ -15,7 +16,8 @@ const orderSelectWithItems = `
         'description', oi.description,
         'price', oi.price,
         'category', oi.category,
-        'type', oi.type
+        'type', oi.type,
+        'unitCost', oi.unit_cost
       ),
       'quantity', oi.quantity,
       'notes', oi.notes
@@ -33,11 +35,25 @@ function formatOrder(order) {
   return {
     id: order.id,
     customerName: order.customer_name,
-    items: items.map((item) => ({
-      menuItem: item.menuItem,
-      quantity: item.quantity,
-      notes: item.notes || undefined,
-    })),
+    items: items.map((item) => {
+      const mi = item.menuItem || {};
+      const menuItem = {
+        id: mi.id,
+        name: mi.name,
+        description: mi.description,
+        price: Number(mi.price),
+        category: mi.category,
+        type: mi.type,
+      };
+      if (mi.unitCost != null && mi.unitCost !== '') {
+        menuItem.unitCost = Number(mi.unitCost);
+      }
+      return {
+        menuItem,
+        quantity: item.quantity,
+        notes: item.notes || undefined,
+      };
+    }),
     total: Number(order.total),
     status: order.status,
     paymentMethod: order.payment_method,
@@ -53,7 +69,13 @@ function formatOrder(order) {
   };
 }
 
-// Get all orders with optional filtering
+/**
+ * GET /orders
+ * Query: forCashRegisterPeriod=true limits orders to those whose cash_register_id
+ * belongs to a cash register opened in the given dateFrom/dateTo window (same as
+ * GET /cash-registers). Does not filter by order created_at. Otherwise dateFrom/dateTo
+ * apply to orders.created_at.
+ */
 router.get('/', async (req, res) => {
   try {
     const {
@@ -65,7 +87,10 @@ router.get('/', async (req, res) => {
       cashRegisterId: rawCashRegisterId,
       type,
       productSearch,
+      forCashRegisterPeriod,
     } = req.query;
+    const useCashRegisterPeriod =
+      forCashRegisterPeriod === 'true' || forCashRegisterPeriod === '1';
     const cashRegisterId =
       rawCashRegisterId != null
         ? Array.isArray(rawCashRegisterId)
@@ -77,17 +102,50 @@ router.get('/', async (req, res) => {
     const params = [];
     let paramIndex = 1;
 
-    if (cashRegisterId) {
+    if (cashRegisterId && !useCashRegisterPeriod) {
       whereClauses.push(`o.cash_register_id = $${paramIndex++}`);
       params.push(cashRegisterId);
     }
-    if (dateFrom) {
-      whereClauses.push(`o.created_at::date >= $${paramIndex++}::date`);
-      params.push(dateFrom);
+
+    if (useCashRegisterPeriod && !dateFrom && !dateTo) {
+      return res.status(400).json({
+        error: 'forCashRegisterPeriod requiere dateFrom o dateTo',
+      });
     }
-    if (dateTo) {
-      whereClauses.push(`o.created_at::date <= $${paramIndex++}::date`);
-      params.push(dateTo);
+
+    if (useCashRegisterPeriod) {
+      const crWhere = [];
+      const crParams = [];
+      if (dateFrom) {
+        crWhere.push(`cr.created_at >= $${crParams.length + 1}::timestamp`);
+        crParams.push(dateFrom);
+      }
+      if (dateTo) {
+        crWhere.push(
+          `cr.created_at < ($${crParams.length + 1}::timestamp::date + interval '1 day')`,
+        );
+        crParams.push(dateTo);
+      }
+      const crSql =
+        crWhere.length > 0
+          ? `SELECT id FROM cash_registers cr WHERE ${crWhere.join(' AND ')}`
+          : `SELECT id FROM cash_registers cr`;
+      const crResult = await db.query(crSql, crParams);
+      const crIds = crResult.rows.map((r) => r.id);
+      if (crIds.length === 0) {
+        return res.json([]);
+      }
+      whereClauses.push(`o.cash_register_id = ANY($${paramIndex++}::text[])`);
+      params.push(crIds);
+    } else {
+      if (dateFrom) {
+        whereClauses.push(`o.created_at::date >= $${paramIndex++}::date`);
+        params.push(dateFrom);
+      }
+      if (dateTo) {
+        whereClauses.push(`o.created_at::date <= $${paramIndex++}::date`);
+        params.push(dateTo);
+      }
     }
     if (status) {
       whereClauses.push(`o.status = $${paramIndex++}`);
@@ -213,6 +271,9 @@ router.post('/', async (req, res) => {
       }
     }
 
+    const menuIds = items.map((item) => item.menuItem?.id).filter(Boolean);
+    const unitCostMap = await getUnitCostsForMenuItemIds(menuIds);
+
     const client = await db.connect();
     let orderId;
     try {
@@ -263,9 +324,10 @@ router.post('/', async (req, res) => {
       );
 
       for (const item of items) {
+        const unitCost = unitCostMap.get(item.menuItem.id) ?? null;
         await client.query(
-          `INSERT INTO order_items (order_id, menu_item_id, name, description, price, category, type, quantity, notes)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          `INSERT INTO order_items (order_id, menu_item_id, name, description, price, category, type, quantity, notes, unit_cost)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [
             orderId,
             item.menuItem.id,
@@ -276,6 +338,7 @@ router.post('/', async (req, res) => {
             item.menuItem.type,
             item.quantity,
             item.notes || null,
+            unitCost,
           ],
         );
       }

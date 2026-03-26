@@ -91,7 +91,8 @@ const CREATE_TABLES = `
     category TEXT NOT NULL,
     type TEXT NOT NULL,
     quantity INTEGER NOT NULL,
-    notes TEXT
+    notes TEXT,
+    unit_cost DOUBLE PRECISION
   );
 
   CREATE TABLE IF NOT EXISTS settings (
@@ -169,6 +170,11 @@ async function initDb() {
         FROM menu_items m
         WHERE oi.menu_item_id = m.id
       `);
+    }
+    if (!oiColNames.includes('unit_cost')) {
+      await client.query(
+        'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_cost DOUBLE PRECISION',
+      );
     }
 
     const mpCols = await client.query(
