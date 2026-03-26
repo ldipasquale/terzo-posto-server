@@ -55,6 +55,13 @@ router.post('/mercado-pago', async (req, res) => {
       [accountId, holder, alias, shouldBeDefault ? 1 : 0, active !== false ? 1 : 0]
     );
 
+    await db.query(
+      `INSERT INTO finance_accounts (id, name, type, mercado_pago_account_id)
+       VALUES ($1, $2, 'partner', $3)
+       ON CONFLICT (id) DO NOTHING`,
+      [`mp-${accountId}`, `${alias} (${holder})`, accountId]
+    );
+
     const result = await db.query(
       `SELECT id, holder, alias, is_default, active
        FROM mercado_pago_accounts WHERE id = $1`,
@@ -96,6 +103,13 @@ router.put('/mercado-pago/:id', async (req, res) => {
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Cuenta de Mercado Pago no encontrada' });
     }
+
+    await db.query(
+      `UPDATE finance_accounts
+       SET name = $1
+       WHERE id = $2`,
+      [`${alias} (${holder})`, `mp-${req.params.id}`]
+    );
 
     const accountResult = await db.query(
       `SELECT id, holder, alias, is_default, active

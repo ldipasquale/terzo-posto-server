@@ -4,6 +4,85 @@ import crypto from "crypto";
 
 const router = express.Router();
 
+async function ensureCashFinanceAccount(client) {
+  await client.query(`
+    INSERT INTO finance_accounts (id, name, type)
+    VALUES ('efectivo', 'Efectivo', 'cash')
+    ON CONFLICT (id) DO NOTHING
+  `);
+}
+
+async function ensurePartnerFinanceAccount(client, mercadoPagoAccountId) {
+  const mp = await client.query(
+    "SELECT id, alias, holder FROM mercado_pago_accounts WHERE id = $1",
+    [mercadoPagoAccountId]
+  );
+  if (!mp.rows[0]) {
+    const err = new Error("Cuenta de Mercado Pago no encontrada");
+    err.statusCode = 400;
+    throw err;
+  }
+  const { id, alias, holder } = mp.rows[0];
+  await client.query(
+    `INSERT INTO finance_accounts (id, name, type, mercado_pago_account_id)
+     VALUES ($1, $2, 'partner', $3)
+     ON CONFLICT (id) DO NOTHING`,
+    [`mp-${id}`, `${alias} (${holder})`, id]
+  );
+}
+
+/**
+ * Una transacción de ingreso por cada medio de pago del cierre (monto = actual neto).
+ */
+async function insertBuffetCloseTransactions(client, cashRegisterId, closingData, eventName) {
+  const payments = Array.isArray(closingData?.payments)
+    ? closingData.payments
+    : [];
+  const labelPrefix = eventName ? `Cierre de caja — ${eventName}` : "Cierre de caja";
+  const closedAt = new Date().toISOString();
+
+  for (const p of payments) {
+    const amount = Number(p.actual);
+    if (!Number.isFinite(amount) || amount <= 0) continue;
+
+    const method = p.method;
+    if (method === "efectivo") {
+      await ensureCashFinanceAccount(client);
+      const txId = crypto.randomUUID();
+      const desc = `${labelPrefix} — ${p.label || "Efectivo"}`;
+      await client.query(
+        `INSERT INTO finance_transactions
+        (id, account_id, type, amount, description, source, category, reference_id, date)
+        VALUES ($1, 'efectivo', 'income', $2, $3, 'buffet', 'buffet', $4, $5)`,
+        [
+          txId,
+          amount,
+          desc,
+          `caja-close:${cashRegisterId}:efectivo`,
+          closedAt,
+        ]
+      );
+    } else if (method && typeof method === "string") {
+      await ensurePartnerFinanceAccount(client, method);
+      const txId = crypto.randomUUID();
+      const desc = `${labelPrefix} — ${p.label || "Mercado Pago"}`;
+      await client.query(
+        `INSERT INTO finance_transactions
+        (id, account_id, type, amount, description, source, category, reference_id, date)
+        VALUES ($1, $2, 'income', $3, $4, 'buffet', 'buffet', $5, $6)`,
+        [
+          txId,
+          `mp-${method}`,
+          amount,
+          desc,
+          `caja-close:${cashRegisterId}:mp:${method}`,
+          closedAt,
+        ]
+      );
+    }
+  }
+}
+
 function formatCashRegister(row) {
   return {
     id: row.id,
@@ -123,7 +202,7 @@ router.patch("/:id/close", async (req, res) => {
     }
 
     const check = await db.query(
-      "SELECT id, status FROM cash_registers WHERE id = $1",
+      "SELECT id, status, event_name FROM cash_registers WHERE id = $1",
       [id]
     );
     const caja = check.rows[0];
@@ -135,15 +214,34 @@ router.patch("/:id/close", async (req, res) => {
     }
 
     const now = new Date().toISOString();
-    await db.query(
-      `UPDATE cash_registers SET status = 'closed', closed_at = $1, closing_data = $2 WHERE id = $3`,
-      [now, JSON.stringify(closingData), id]
-    );
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await insertBuffetCloseTransactions(
+        client,
+        id,
+        closingData,
+        caja.event_name
+      );
+      await client.query(
+        `UPDATE cash_registers SET status = 'closed', closed_at = $1, closing_data = $2 WHERE id = $3`,
+        [now, JSON.stringify(closingData), id]
+      );
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
 
     const result = await db.query("SELECT * FROM cash_registers WHERE id = $1", [id]);
     res.json(formatCashRegister(result.rows[0]));
   } catch (error) {
     console.error("Error closing cash register:", error);
+    if (error.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: "Error al cerrar la caja" });
   }
 });
