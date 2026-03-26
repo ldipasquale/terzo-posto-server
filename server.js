@@ -8,6 +8,8 @@ import settingsRoutes from './routes/settings.js';
 import cashRegistersRoutes from './routes/cashRegisters.js';
 import suppliesRoutes from './routes/supplies.js';
 import openAccountsRoutes from './routes/openAccounts.js';
+import agendaRoutes from './routes/agenda.js';
+import financeRoutes from './routes/finance.js';
 import { authenticateToken } from './middleware/auth.js';
 
 const app = express();
@@ -32,6 +34,8 @@ app.use('/api/settings', authenticateToken, settingsRoutes);
 app.use('/api/cash-registers', authenticateToken, cashRegistersRoutes);
 app.use('/api/supplies', authenticateToken, suppliesRoutes);
 app.use('/api/open-accounts', authenticateToken, openAccountsRoutes);
+app.use('/api/agenda', authenticateToken, agendaRoutes);
+app.use('/api/finance', authenticateToken, financeRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {

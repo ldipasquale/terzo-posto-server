@@ -9,6 +9,7 @@ function formatCashRegister(row) {
     id: row.id,
     date: row.date,
     mercadoPagoAccountId: row.mercado_pago_account_id,
+    eventId: row.event_id || undefined,
     eventName: row.event_name || undefined,
     startingCash: row.starting_cash != null ? Number(row.starting_cash) : undefined,
     status: row.status,
@@ -65,7 +66,7 @@ router.get("/current", async (req, res) => {
 // POST /api/cash-registers — open a new cash register
 router.post("/", async (req, res) => {
   try {
-    const { mercadoPagoAccountId, eventName, startingCash } = req.body;
+    const { mercadoPagoAccountId, eventId, eventName, startingCash } = req.body;
     if (!mercadoPagoAccountId) {
       return res.status(400).json({ error: "Cuenta de Mercado Pago es requerida" });
     }
@@ -82,9 +83,9 @@ router.post("/", async (req, res) => {
     const date = now.toISOString().split("T")[0];
 
     await db.query(
-      `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_name, starting_cash, status)
-       VALUES ($1, $2, $3, $4, $5, 'open')`,
-      [id, date, mercadoPagoAccountId, eventName || null, startingCash ?? null]
+      `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'open')`,
+      [id, date, mercadoPagoAccountId, eventId || null, eventName || null, startingCash ?? null]
     );
 
     const result = await db.query("SELECT * FROM cash_registers WHERE id = $1", [id]);

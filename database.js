@@ -41,6 +41,7 @@ const CREATE_TABLES = `
     id TEXT PRIMARY KEY,
     date DATE NOT NULL,
     mercado_pago_account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
+    event_id TEXT,
     event_name TEXT,
     starting_cash DOUBLE PRECISION,
     status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
@@ -113,6 +114,97 @@ const CREATE_TABLES = `
     yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS agenda_rooms (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    default_price_per_hour DOUBLE PRECISION NOT NULL,
+    color TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS agenda_rentals (
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL CHECK (type IN ('recurring', 'one-off', 'seminar')),
+    person_name TEXT NOT NULL,
+    person_phone TEXT NOT NULL,
+    activity_name TEXT NOT NULL,
+    room_id TEXT NOT NULL REFERENCES agenda_rooms(id),
+    notes TEXT,
+    finalized SMALLINT NOT NULL DEFAULT 0,
+    schedules JSONB,
+    price_per_hour DOUBLE PRECISION,
+    start_month TEXT,
+    end_month TEXT,
+    event_type TEXT,
+    date DATE,
+    start_time TEXT,
+    end_time TEXT,
+    fixed_price DOUBLE PRECISION,
+    consumption_credit DOUBLE PRECISION,
+    has_tickets SMALLINT,
+    ticket_price DOUBLE PRECISION,
+    revenue_share_percent DOUBLE PRECISION,
+    date_slots JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS agenda_payments (
+    id TEXT PRIMARY KEY,
+    rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+    month TEXT,
+    amount DOUBLE PRECISION NOT NULL,
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
+    mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+    description TEXT,
+    payment_type TEXT CHECK (payment_type IN ('rental', 'tickets')),
+    paid_date TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS finance_accounts (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('partner', 'cash')),
+    mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS finance_transactions (
+    id TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL REFERENCES finance_accounts(id),
+    type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+    amount DOUBLE PRECISION NOT NULL,
+    description TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense')),
+    category TEXT,
+    reference_id TEXT,
+    date TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS finance_fixed_expenses (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    amount DOUBLE PRECISION NOT NULL,
+    due_day INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
+    notes TEXT,
+    active SMALLINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS finance_fixed_expense_payments (
+    id TEXT PRIMARY KEY,
+    fixed_expense_id TEXT NOT NULL REFERENCES finance_fixed_expenses(id) ON DELETE CASCADE,
+    month TEXT NOT NULL,
+    amount DOUBLE PRECISION NOT NULL,
+    account_id TEXT NOT NULL REFERENCES finance_accounts(id),
+    paid_date TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 `;
 
@@ -289,6 +381,7 @@ async function initDb() {
           id TEXT PRIMARY KEY,
           date DATE NOT NULL,
           mercado_pago_account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
+          event_id TEXT,
           event_name TEXT,
           starting_cash DOUBLE PRECISION,
           status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
@@ -298,11 +391,58 @@ async function initDb() {
         )
       `);
     }
+    const cashRegisterCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'cash_registers'",
+    );
+    const cashRegisterColNames = cashRegisterCols.rows.map(
+      (r) => r.column_name,
+    );
+    if (!cashRegisterColNames.includes('event_id')) {
+      await client.query(
+        'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS event_id TEXT',
+      );
+    }
     if (!ordersColNames.includes('cash_register_id')) {
       await client.query(
         'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_register_id TEXT REFERENCES cash_registers(id)',
       );
     }
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_agenda_rentals_date ON agenda_rentals(date);
+      CREATE INDEX IF NOT EXISTS idx_agenda_rentals_type ON agenda_rentals(type);
+      CREATE INDEX IF NOT EXISTS idx_agenda_payments_rental_id ON agenda_payments(rental_id);
+      CREATE INDEX IF NOT EXISTS idx_agenda_payments_paid_date ON agenda_payments(paid_date);
+      CREATE INDEX IF NOT EXISTS idx_finance_transactions_date ON finance_transactions(date);
+      CREATE INDEX IF NOT EXISTS idx_finance_transactions_account_id ON finance_transactions(account_id);
+      CREATE INDEX IF NOT EXISTS idx_finance_transactions_source ON finance_transactions(source);
+      CREATE INDEX IF NOT EXISTS idx_fixed_expense_payments_month ON finance_fixed_expense_payments(month);
+      CREATE INDEX IF NOT EXISTS idx_cash_registers_event_id ON cash_registers(event_id);
+      CREATE INDEX IF NOT EXISTS idx_cash_registers_created_at ON cash_registers(created_at);
+    `);
+
+    await client.query(`
+      INSERT INTO finance_accounts (id, name, type)
+      VALUES ('efectivo', 'Efectivo', 'cash')
+      ON CONFLICT (id) DO NOTHING
+    `);
+
+    await client.query(`
+      INSERT INTO agenda_rooms (id, name, default_price_per_hour, color)
+      VALUES ('full-venue', 'Lugar completo', 0, 'orange')
+      ON CONFLICT (id) DO NOTHING
+    `);
+
+    await client.query(`
+      INSERT INTO finance_accounts (id, name, type, mercado_pago_account_id)
+      SELECT
+        'mp-' || m.id,
+        m.alias || ' (' || m.holder || ')',
+        'partner',
+        m.id
+      FROM mercado_pago_accounts m
+      ON CONFLICT (id) DO NOTHING
+    `);
 
     // Seed default menu if empty
     const menuCount = await client.query(
