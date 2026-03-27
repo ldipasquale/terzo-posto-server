@@ -376,4 +376,128 @@ router.get('/events-profitability', async (req, res) => {
   }
 });
 
+function parseJsonArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+function getSlotHours(slot) {
+  if (!slot?.startTime || !slot?.endTime) return 0;
+  const [sh, sm] = String(slot.startTime).split(':').map(Number);
+  const [eh, em] = String(slot.endTime).split(':').map(Number);
+  if (![sh, sm, eh, em].every(Number.isFinite)) return 0;
+  return Math.max(0, eh + em / 60 - (sh + sm / 60));
+}
+
+router.get('/workshops-analysis', async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const params = [];
+    const where = [
+      "r.type IN ('recurring', 'seminar')",
+      "COALESCE(ap.payment_type, 'rental') = 'rental'",
+    ];
+    let n = 1;
+
+    if (from) {
+      where.push(`ap.paid_date::date >= $${n++}::date`);
+      params.push(from);
+    }
+    if (to) {
+      where.push(`ap.paid_date::date <= $${n++}::date`);
+      params.push(to);
+    }
+
+    const result = await db.query(
+      `
+      SELECT
+        ap.amount,
+        r.type AS rental_type,
+        r.room_id,
+        rm.name AS room_name,
+        r.schedules,
+        r.date_slots
+      FROM agenda_payments ap
+      JOIN agenda_rentals r ON r.id = ap.rental_id
+      LEFT JOIN agenda_rooms rm ON rm.id = r.room_id
+      WHERE ${where.join(' AND ')}
+      `,
+      params,
+    );
+
+    const roomMap = new Map();
+    const dayMap = new Map();
+    [1, 2, 3, 4, 5, 6, 0].forEach((d) => dayMap.set(d, 0));
+    let totalIncome = 0;
+
+    for (const row of result.rows) {
+      const amount = Number(row.amount) || 0;
+      if (amount <= 0) continue;
+      totalIncome += amount;
+
+      const roomId = row.room_id || 'sin-sala';
+      const roomName = row.room_name || 'Sin sala';
+      roomMap.set(
+        roomId,
+        (roomMap.get(roomId) || { roomId, name: roomName, amount: 0 }),
+      );
+      roomMap.get(roomId).amount += amount;
+
+      if (row.rental_type === 'recurring') {
+        const schedules = parseJsonArray(row.schedules);
+        const totalHours = schedules.reduce((s, slot) => s + getSlotHours(slot), 0);
+        if (totalHours <= 0) continue;
+        for (const slot of schedules) {
+          const dow = Number(slot.dayOfWeek);
+          if (!dayMap.has(dow)) continue;
+          const slotHours = getSlotHours(slot);
+          const portion = slotHours / totalHours;
+          dayMap.set(dow, (dayMap.get(dow) || 0) + amount * portion);
+        }
+      } else if (row.rental_type === 'seminar') {
+        const dateSlots = parseJsonArray(row.date_slots);
+        const totalHours = dateSlots.reduce((s, slot) => s + getSlotHours(slot), 0);
+        if (totalHours <= 0) continue;
+        for (const slot of dateSlots) {
+          const dateStr = String(slot.date || '').slice(0, 10);
+          if (!dateStr) continue;
+          const d = new Date(`${dateStr}T12:00:00`);
+          if (Number.isNaN(d.getTime())) continue;
+          const dow = d.getDay();
+          if (!dayMap.has(dow)) continue;
+          const slotHours = getSlotHours(slot);
+          const portion = slotHours / totalHours;
+          dayMap.set(dow, (dayMap.get(dow) || 0) + amount * portion);
+        }
+      }
+    }
+
+    const byRoom = Array.from(roomMap.values())
+      .map((r) => ({ roomId: r.roomId, name: r.name, amount: Number(r.amount) }))
+      .sort((a, b) => b.amount - a.amount);
+    const byDay = [1, 2, 3, 4, 5, 6, 0].map((dayOfWeek) => ({
+      dayOfWeek,
+      amount: Math.round(Number(dayMap.get(dayOfWeek) || 0)),
+    }));
+
+    res.json({
+      totalIncome: Number(totalIncome),
+      byRoom,
+      byDay,
+    });
+  } catch (error) {
+    console.error('Error fetching workshops analysis:', error);
+    res.status(500).json({ error: 'Error al obtener reporte de talleres' });
+  }
+});
+
 export default router;
