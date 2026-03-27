@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "migrate:march-2026-finances": "node scripts/migrate-march-2026-finances.mjs",
+    "clear:finance-transactions": "node scripts/clear-finance-transactions.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
