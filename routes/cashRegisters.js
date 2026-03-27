@@ -4,31 +4,16 @@ import crypto from "crypto";
 
 const router = express.Router();
 
-async function ensureCashFinanceAccount(client) {
-  await client.query(`
-    INSERT INTO finance_accounts (id, name, type)
-    VALUES ('efectivo', 'Efectivo', 'cash')
-    ON CONFLICT (id) DO NOTHING
-  `);
-}
-
-async function ensurePartnerFinanceAccount(client, mercadoPagoAccountId) {
+async function assertMercadoPagoLiquidityAccount(client, mercadoPagoAccountId) {
   const mp = await client.query(
-    "SELECT id, alias, holder FROM mercado_pago_accounts WHERE id = $1",
-    [mercadoPagoAccountId]
+    "SELECT id FROM mercado_pago_accounts WHERE id = $1 AND id != 'efectivo'",
+    [mercadoPagoAccountId],
   );
   if (!mp.rows[0]) {
     const err = new Error("Cuenta de Mercado Pago no encontrada");
     err.statusCode = 400;
     throw err;
   }
-  const { id, alias, holder } = mp.rows[0];
-  await client.query(
-    `INSERT INTO finance_accounts (id, name, type, mercado_pago_account_id)
-     VALUES ($1, $2, 'partner', $3)
-     ON CONFLICT (id) DO NOTHING`,
-    [`mp-${id}`, `${alias} (${holder})`, id]
-  );
 }
 
 /**
@@ -47,7 +32,6 @@ async function insertBuffetCloseTransactions(client, cashRegisterId, closingData
 
     const method = p.method;
     if (method === "efectivo") {
-      await ensureCashFinanceAccount(client);
       const txId = crypto.randomUUID();
       const desc = `${labelPrefix} — ${p.label || "Efectivo"}`;
       await client.query(
@@ -63,7 +47,7 @@ async function insertBuffetCloseTransactions(client, cashRegisterId, closingData
         ]
       );
     } else if (method && typeof method === "string") {
-      await ensurePartnerFinanceAccount(client, method);
+      await assertMercadoPagoLiquidityAccount(client, method);
       const txId = crypto.randomUUID();
       const desc = `${labelPrefix} — ${p.label || "Mercado Pago"}`;
       await client.query(
@@ -72,7 +56,7 @@ async function insertBuffetCloseTransactions(client, cashRegisterId, closingData
         VALUES ($1, $2, 'income', $3, $4, 'buffet', 'buffet', $5, $6)`,
         [
           txId,
-          `mp-${method}`,
+          method,
           amount,
           desc,
           `caja-close:${cashRegisterId}:mp:${method}`,
@@ -148,6 +132,11 @@ router.post("/", async (req, res) => {
     const { mercadoPagoAccountId, eventId, eventName, startingCash } = req.body;
     if (!mercadoPagoAccountId) {
       return res.status(400).json({ error: "Cuenta de Mercado Pago es requerida" });
+    }
+    if (mercadoPagoAccountId === "efectivo") {
+      return res.status(400).json({
+        error: "La caja debe asociarse a una cuenta de Mercado Pago (no efectivo)",
+      });
     }
 
     const existing = await db.query(

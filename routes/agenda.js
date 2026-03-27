@@ -80,7 +80,7 @@ async function ensureFullVenueRoom(client) {
 
 function getFinanceAccountId(paymentMethod, mercadoPagoAccountId) {
   if (paymentMethod === 'mercadopago' && mercadoPagoAccountId) {
-    return `mp-${mercadoPagoAccountId}`;
+    return mercadoPagoAccountId;
   }
   return 'efectivo';
 }

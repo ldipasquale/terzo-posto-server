@@ -9,6 +9,7 @@ router.get('/mercado-pago', async (req, res) => {
     const result = await db.query(`
       SELECT id, holder, alias, is_default, active
       FROM mercado_pago_accounts
+      WHERE id != 'efectivo' AND COALESCE(kind, 'mercadopago') = 'mercadopago'
       ORDER BY is_default DESC, created_at ASC
     `);
 
@@ -50,16 +51,9 @@ router.post('/mercado-pago', async (req, res) => {
     const shouldBeDefault = isDefault || accountCount.rows[0].count === 0;
 
     await db.query(
-      `INSERT INTO mercado_pago_accounts (id, holder, alias, is_default, active)
-       VALUES ($1, $2, $3, $4, $5)`,
+      `INSERT INTO mercado_pago_accounts (id, holder, alias, is_default, active, kind)
+       VALUES ($1, $2, $3, $4, $5, 'mercadopago')`,
       [accountId, holder, alias, shouldBeDefault ? 1 : 0, active !== false ? 1 : 0]
-    );
-
-    await db.query(
-      `INSERT INTO finance_accounts (id, name, type, mercado_pago_account_id)
-       VALUES ($1, $2, 'partner', $3)
-       ON CONFLICT (id) DO NOTHING`,
-      [`mp-${accountId}`, `${alias} (${holder})`, accountId]
     );
 
     const result = await db.query(
@@ -85,6 +79,9 @@ router.post('/mercado-pago', async (req, res) => {
 // Update Mercado Pago account
 router.put('/mercado-pago/:id', async (req, res) => {
   try {
+    if (req.params.id === 'efectivo') {
+      return res.status(400).json({ error: 'No se puede editar la cuenta de efectivo' });
+    }
     const { holder, alias, isDefault, active } = req.body;
 
     if (isDefault) {
@@ -103,13 +100,6 @@ router.put('/mercado-pago/:id', async (req, res) => {
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Cuenta de Mercado Pago no encontrada' });
     }
-
-    await db.query(
-      `UPDATE finance_accounts
-       SET name = $1
-       WHERE id = $2`,
-      [`${alias} (${holder})`, `mp-${req.params.id}`]
-    );
 
     const accountResult = await db.query(
       `SELECT id, holder, alias, is_default, active
@@ -134,6 +124,10 @@ router.put('/mercado-pago/:id', async (req, res) => {
 // Delete Mercado Pago account
 router.delete('/mercado-pago/:id', async (req, res) => {
   try {
+    if (req.params.id === 'efectivo') {
+      return res.status(400).json({ error: 'No se puede eliminar la cuenta de efectivo' });
+    }
+
     const countResult = await db.query(
       `SELECT COUNT(*)::int AS count FROM orders WHERE mercado_pago_account_id = $1`,
       [req.params.id]

@@ -4,12 +4,15 @@ import db from '../database.js';
 
 const router = express.Router();
 
-const mapAccount = (row) => ({
-  id: row.id,
-  name: row.name,
-  type: row.type,
-  mercadoPagoAccountId: row.mercado_pago_account_id || undefined,
-});
+function mapLiquidityAccount(row) {
+  const isCash = row.kind === 'cash' || row.id === 'efectivo';
+  return {
+    id: row.id,
+    name: isCash ? 'Efectivo' : `${row.alias} (${row.holder})`,
+    type: isCash ? 'cash' : 'partner',
+    mercadoPagoAccountId: isCash ? undefined : row.id,
+  };
+}
 
 const mapTransaction = (row) => ({
   id: row.id,
@@ -45,8 +48,12 @@ const mapFixedExpensePayment = (row) => ({
 
 router.get('/accounts', async (_req, res) => {
   try {
-    const result = await db.query('SELECT * FROM finance_accounts ORDER BY created_at ASC');
-    res.json(result.rows.map(mapAccount));
+    const result = await db.query(
+      `SELECT * FROM mercado_pago_accounts
+       WHERE active = 1 OR id = 'efectivo'
+       ORDER BY CASE WHEN kind = 'cash' OR id = 'efectivo' THEN 0 ELSE 1 END, created_at ASC`,
+    );
+    res.json(result.rows.map(mapLiquidityAccount));
   } catch (error) {
     console.error('Error fetching finance accounts:', error);
     res.status(500).json({ error: 'Error al obtener cuentas' });
@@ -63,12 +70,31 @@ router.get('/transactions', async (_req, res) => {
   }
 });
 
+function normalizeAccountId(accountId) {
+  if (!accountId || typeof accountId !== 'string') return accountId;
+  return accountId.startsWith('mp-') ? accountId.slice(3) : accountId;
+}
+
+async function assertLiquidityAccountExists(accountId) {
+  const acc = await db.query(
+    'SELECT id FROM mercado_pago_accounts WHERE id = $1',
+    [accountId],
+  );
+  if (!acc.rows[0]) {
+    const err = new Error('Cuenta inválida o inexistente');
+    err.statusCode = 400;
+    throw err;
+  }
+}
+
 router.post('/transactions', async (req, res) => {
   try {
     const t = req.body;
     if (!t?.accountId || !t?.type || Number(t.amount) <= 0 || !t?.description) {
       return res.status(400).json({ error: 'Datos inválidos de movimiento' });
     }
+    const accountId = normalizeAccountId(t.accountId);
+    await assertLiquidityAccountExists(accountId);
     const id = crypto.randomUUID();
     await db.query(
       `INSERT INTO finance_transactions
@@ -76,7 +102,7 @@ router.post('/transactions', async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
       [
         id,
-        t.accountId,
+        accountId,
         t.type,
         Number(t.amount),
         String(t.description).trim(),
@@ -90,6 +116,9 @@ router.post('/transactions', async (req, res) => {
     res.status(201).json(mapTransaction(created.rows[0]));
   } catch (error) {
     console.error('Error creating finance transaction:', error);
+    if (error.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: 'Error al crear movimiento' });
   }
 });
@@ -194,34 +223,43 @@ router.get('/fixed-expense-payments', async (_req, res) => {
 });
 
 router.post('/fixed-expense-payments', async (req, res) => {
-  const client = await db.connect();
   try {
     const p = req.body;
     if (!p?.fixedExpenseId || !p?.month || Number(p.amount) <= 0 || !p?.accountId) {
       return res.status(400).json({ error: 'Datos inválidos de pago' });
     }
-    const expenseRes = await client.query(
+    const accountId = normalizeAccountId(p.accountId);
+    try {
+      await assertLiquidityAccountExists(accountId);
+    } catch (e) {
+      if (e.statusCode === 400) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+
+    const expenseRes = await db.query(
       'SELECT id, name FROM finance_fixed_expenses WHERE id = $1',
       [p.fixedExpenseId],
     );
     const expense = expenseRes.rows[0];
     if (!expense) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
 
+    const client = await db.connect();
     const id = crypto.randomUUID();
     const txId = crypto.randomUUID();
     const paidDate = p.paidDate || new Date().toISOString();
+    try {
     await client.query('BEGIN');
     await client.query(
       `INSERT INTO finance_fixed_expense_payments
       (id, fixed_expense_id, month, amount, account_id, paid_date)
       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [id, p.fixedExpenseId, p.month, Number(p.amount), p.accountId, paidDate],
+      [id, p.fixedExpenseId, p.month, Number(p.amount), accountId, paidDate],
     );
     await client.query(
       `INSERT INTO finance_transactions
       (id, account_id, type, amount, description, source, category, reference_id, date)
       VALUES ($1,$2,'expense',$3,$4,'fixed-expense','gasto-fijo',$5,$6)`,
-      [txId, p.accountId, Number(p.amount), `${expense.name} — ${p.month}`, id, paidDate],
+      [txId, accountId, Number(p.amount), `${expense.name} — ${p.month}`, id, paidDate],
     );
     await client.query('COMMIT');
     const created = await db.query(
@@ -229,12 +267,15 @@ router.post('/fixed-expense-payments', async (req, res) => {
       [id],
     );
     res.status(201).json(mapFixedExpensePayment(created.rows[0]));
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Error creating fixed expense payment:', error);
     res.status(500).json({ error: 'Error al registrar pago' });
-  } finally {
-    client.release();
   }
 });
 

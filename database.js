@@ -34,6 +34,7 @@ const CREATE_TABLES = `
     alias TEXT NOT NULL,
     is_default SMALLINT NOT NULL DEFAULT 0,
     active SMALLINT NOT NULL DEFAULT 1,
+    kind TEXT NOT NULL DEFAULT 'mercadopago' CHECK (kind IN ('cash', 'mercadopago')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -165,17 +166,9 @@ const CREATE_TABLES = `
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
-  CREATE TABLE IF NOT EXISTS finance_accounts (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('partner', 'cash')),
-    mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  );
-
   CREATE TABLE IF NOT EXISTS finance_transactions (
     id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL REFERENCES finance_accounts(id),
+    account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
     type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
     amount DOUBLE PRECISION NOT NULL,
     description TEXT NOT NULL,
@@ -202,7 +195,7 @@ const CREATE_TABLES = `
     fixed_expense_id TEXT NOT NULL REFERENCES finance_fixed_expenses(id) ON DELETE CASCADE,
     month TEXT NOT NULL,
     amount DOUBLE PRECISION NOT NULL,
-    account_id TEXT NOT NULL REFERENCES finance_accounts(id),
+    account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
     paid_date TIMESTAMP NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -277,6 +270,57 @@ async function initDb() {
       await client.query(
         'ALTER TABLE mercado_pago_accounts ADD COLUMN IF NOT EXISTS active SMALLINT NOT NULL DEFAULT 1',
       );
+    }
+    if (!mpColNames.includes('kind')) {
+      await client.query(`
+        ALTER TABLE mercado_pago_accounts ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'mercadopago'
+      `);
+      await client.query(`
+        DO $$ BEGIN
+          ALTER TABLE mercado_pago_accounts ADD CONSTRAINT mercado_pago_accounts_kind_check
+            CHECK (kind IN ('cash', 'mercadopago'));
+        EXCEPTION WHEN duplicate_object THEN NULL; END $$
+      `);
+    }
+
+    await client.query(`
+      INSERT INTO mercado_pago_accounts (id, holder, alias, is_default, active, kind)
+      VALUES ('efectivo', 'Efectivo', 'Efectivo', 0, 1, 'cash')
+      ON CONFLICT (id) DO UPDATE SET kind = 'cash', holder = EXCLUDED.holder, alias = EXCLUDED.alias
+    `);
+
+    const financeAccountsExists =
+      (
+        await client.query(
+          "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'finance_accounts'",
+        )
+      ).rows.length > 0;
+    if (financeAccountsExists) {
+      await client.query(`
+        ALTER TABLE finance_transactions DROP CONSTRAINT IF EXISTS finance_transactions_account_id_fkey
+      `);
+      await client.query(`
+        ALTER TABLE finance_fixed_expense_payments DROP CONSTRAINT IF EXISTS finance_fixed_expense_payments_account_id_fkey
+      `);
+      await client.query(`
+        UPDATE finance_transactions SET account_id = SUBSTRING(account_id FROM 4)
+        WHERE account_id LIKE 'mp-%'
+      `);
+      await client.query(`
+        UPDATE finance_fixed_expense_payments SET account_id = SUBSTRING(account_id FROM 4)
+        WHERE account_id LIKE 'mp-%'
+      `);
+      await client.query(`
+        ALTER TABLE finance_transactions
+        ADD CONSTRAINT finance_transactions_account_id_fkey
+        FOREIGN KEY (account_id) REFERENCES mercado_pago_accounts(id)
+      `);
+      await client.query(`
+        ALTER TABLE finance_fixed_expense_payments
+        ADD CONSTRAINT finance_fixed_expense_payments_account_id_fkey
+        FOREIGN KEY (account_id) REFERENCES mercado_pago_accounts(id)
+      `);
+      await client.query(`DROP TABLE finance_accounts`);
     }
 
     const ordersCols = await client.query(
@@ -422,25 +466,14 @@ async function initDb() {
     `);
 
     await client.query(`
-      INSERT INTO finance_accounts (id, name, type)
-      VALUES ('efectivo', 'Efectivo', 'cash')
-      ON CONFLICT (id) DO NOTHING
+      INSERT INTO mercado_pago_accounts (id, holder, alias, is_default, active, kind)
+      VALUES ('efectivo', 'Efectivo', 'Efectivo', 0, 1, 'cash')
+      ON CONFLICT (id) DO UPDATE SET kind = 'cash', holder = EXCLUDED.holder, alias = EXCLUDED.alias
     `);
 
     await client.query(`
       INSERT INTO agenda_rooms (id, name, default_price_per_hour, color)
       VALUES ('full-venue', 'Lugar completo', 0, 'orange')
-      ON CONFLICT (id) DO NOTHING
-    `);
-
-    await client.query(`
-      INSERT INTO finance_accounts (id, name, type, mercado_pago_account_id)
-      SELECT
-        'mp-' || m.id,
-        m.alias || ' (' || m.holder || ')',
-        'partner',
-        m.id
-      FROM mercado_pago_accounts m
       ON CONFLICT (id) DO NOTHING
     `);
 
