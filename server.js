@@ -10,6 +10,7 @@ import suppliesRoutes from './routes/supplies.js';
 import openAccountsRoutes from './routes/openAccounts.js';
 import agendaRoutes from './routes/agenda.js';
 import financeRoutes from './routes/finance.js';
+import purchasesRoutes from './routes/purchases.js';
 import { authenticateToken } from './middleware/auth.js';
 
 const app = express();
@@ -36,6 +37,7 @@ app.use('/api/supplies', authenticateToken, suppliesRoutes);
 app.use('/api/open-accounts', authenticateToken, openAccountsRoutes);
 app.use('/api/agenda', authenticateToken, agendaRoutes);
 app.use('/api/finance', authenticateToken, financeRoutes);
+app.use('/api/purchases', authenticateToken, purchasesRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {

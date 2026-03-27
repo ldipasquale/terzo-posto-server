@@ -117,6 +117,30 @@ const CREATE_TABLES = `
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS buffet_purchases (
+    id TEXT PRIMARY KEY,
+    date TIMESTAMP NOT NULL,
+    subtotal DOUBLE PRECISION NOT NULL DEFAULT 0,
+    discount DOUBLE PRECISION NOT NULL DEFAULT 0,
+    total DOUBLE PRECISION NOT NULL DEFAULT 0,
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
+    mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+    category TEXT NOT NULL CHECK (category IN ('comida', 'bebida')),
+    provider TEXT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS buffet_purchase_items (
+    id SERIAL PRIMARY KEY,
+    purchase_id TEXT NOT NULL REFERENCES buffet_purchases(id) ON DELETE CASCADE,
+    supply_id TEXT NOT NULL REFERENCES supplies(id),
+    supply_name TEXT NOT NULL,
+    quantity DOUBLE PRECISION NOT NULL,
+    unit_price DOUBLE PRECISION NOT NULL,
+    previous_price DOUBLE PRECISION
+  );
+
   CREATE TABLE IF NOT EXISTS agenda_rooms (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -463,6 +487,8 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_fixed_expense_payments_month ON finance_fixed_expense_payments(month);
       CREATE INDEX IF NOT EXISTS idx_cash_registers_event_id ON cash_registers(event_id);
       CREATE INDEX IF NOT EXISTS idx_cash_registers_created_at ON cash_registers(created_at);
+      CREATE INDEX IF NOT EXISTS idx_buffet_purchases_date ON buffet_purchases(date);
+      CREATE INDEX IF NOT EXISTS idx_buffet_purchase_items_purchase_id ON buffet_purchase_items(purchase_id);
     `);
 
     await client.query(`
