@@ -33,7 +33,7 @@ const mapRental = (row) => ({
   personName: row.person_name,
   personPhone: row.person_phone,
   activityName: row.activity_name,
-  roomId: row.room_id,
+  roomId: row.room_id === 'full-space' ? 'full-venue' : row.room_id,
   notes: row.notes || undefined,
   finalized: Boolean(row.finalized),
   schedules: row.schedules || undefined,
@@ -57,6 +57,12 @@ const mapRental = (row) => ({
   dateSlots: row.date_slots || undefined,
   createdAt: new Date(row.created_at).toISOString(),
 });
+
+function normalizeRoomId(roomId) {
+  if (!roomId) return roomId;
+  if (roomId === 'full-space') return 'full-venue';
+  return roomId;
+}
 
 const mapPayment = (row) => ({
   id: row.id,
@@ -88,7 +94,10 @@ function getFinanceAccountId(paymentMethod, mercadoPagoAccountId) {
 router.get('/rooms', async (_req, res) => {
   try {
     const result = await db.query(
-      'SELECT * FROM agenda_rooms ORDER BY name ASC',
+      `SELECT * FROM agenda_rooms
+       WHERE id NOT IN ('full-venue', 'full-space')
+         AND LOWER(TRIM(name)) <> 'espacio completo'
+       ORDER BY name ASC`,
     );
     res.json(result.rows.map(mapRoom));
   } catch (error) {
@@ -185,10 +194,11 @@ router.get('/rentals', async (_req, res) => {
 router.post('/rentals', async (req, res) => {
   try {
     const r = req.body;
-    if (!r?.type || !r?.personName || !r?.activityName || !r?.roomId) {
+    const roomId = normalizeRoomId(r?.roomId);
+    if (!r?.type || !r?.personName || !r?.activityName || !roomId) {
       return res.status(400).json({ error: 'Datos inválidos de alquiler' });
     }
-    if (r.roomId === 'full-venue') {
+    if (roomId === 'full-venue') {
       await ensureFullVenueRoom(db);
     }
     const id = crypto.randomUUID();
@@ -209,7 +219,7 @@ router.post('/rentals', async (req, res) => {
         r.personName,
         r.personPhone ?? '',
         r.activityName,
-        r.roomId,
+        roomId,
         r.notes ?? null,
         r.finalized ? 1 : 0,
         r.schedules ? JSON.stringify(r.schedules) : null,
@@ -248,7 +258,8 @@ router.put('/rentals/:id', async (req, res) => {
       'personPhone',
     );
     const personPhoneValue = hasPersonPhone ? (r.personPhone ?? '') : null;
-    if (r.roomId === 'full-venue') {
+    const roomId = normalizeRoomId(r?.roomId);
+    if (roomId === 'full-venue') {
       await ensureFullVenueRoom(db);
     }
     const result = await db.query(
@@ -281,7 +292,7 @@ router.put('/rentals/:id', async (req, res) => {
         r.personName ?? null,
         personPhoneValue,
         r.activityName ?? null,
-        r.roomId ?? null,
+        roomId ?? null,
         r.notes ?? null,
         r.finalized == null ? null : r.finalized ? 1 : 0,
         r.schedules ? JSON.stringify(r.schedules) : null,
