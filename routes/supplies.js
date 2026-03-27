@@ -25,11 +25,40 @@ function normalizeRecipeLine(line) {
   return { supplyId: String(supplyId), quantity: Number(line.quantity) };
 }
 
-function rowToSupply(row, costInfo = null) {
+async function getLatestPurchasedValuesMap(client) {
+  const result = await client.query(`
+    SELECT DISTINCT ON (pi.supply_id)
+      pi.supply_id,
+      pi.presentation_quantity,
+      pi.presentation_unit,
+      pi.unit_price_per_unit,
+      p.date AS purchased_at
+    FROM buffet_purchase_items pi
+    JOIN buffet_purchases p ON p.id = pi.purchase_id
+    ORDER BY pi.supply_id, p.date DESC, pi.id DESC
+  `);
+  const map = {};
+  for (const row of result.rows) {
+    map[row.supply_id] = {
+      presentationQuantity:
+        row.presentation_quantity == null
+          ? null
+          : Number(row.presentation_quantity),
+      unitPrice:
+        row.unit_price_per_unit == null ? null : Number(row.unit_price_per_unit),
+      unit: row.presentation_unit || undefined,
+      purchasedAt: row.purchased_at ? new Date(row.purchased_at).toISOString() : undefined,
+    };
+  }
+  return map;
+}
+
+function rowToSupply(row, latestPurchaseMap = {}, costInfo = null) {
   const recipe = parseRecipe(row.recipe);
   const recipeNormalized = Array.isArray(recipe)
     ? recipe.map(normalizeRecipeLine).filter(Boolean)
     : null;
+  const latest = latestPurchaseMap[row.id];
   const out = {
     id: row.id,
     name: row.name,
@@ -40,6 +69,14 @@ function rowToSupply(row, costInfo = null) {
     recipe: recipeNormalized ?? undefined,
     yieldAmount: row.yield_amount != null ? Number(row.yield_amount) : undefined,
     yieldUnit: row.yield_unit ?? undefined,
+    lastPurchaseQuantity:
+      latest?.presentationQuantity == null
+        ? undefined
+        : Number(latest.presentationQuantity),
+    lastPurchaseUnitPrice:
+      latest?.unitPrice == null ? undefined : Number(latest.unitPrice),
+    lastPurchaseUnit: latest?.unit,
+    lastPurchasedAt: latest?.purchasedAt,
   };
   if (costInfo) {
     if (costInfo.costPerUnit !== undefined && costInfo.costPerUnit !== null) {
@@ -75,7 +112,7 @@ function rowToSupplyInternal(row) {
  * Compute cost info. Purchased: costPerUnit = price/quantity, totalCost = null.
  * Composed: totalCost = sum(recipe line cost), costPerUnit = totalCost / yield (for use in recipes). Uses visited set for cycle detection.
  */
-function getSupplyCostInfo(supply, suppliesById, visited = new Set()) {
+function getSupplyCostInfo(supply, suppliesById, latestPurchaseMap = {}, visited = new Set()) {
   if (visited.has(supply.id)) {
     throw new Error('Circular reference in supply recipe');
   }
@@ -83,8 +120,9 @@ function getSupplyCostInfo(supply, suppliesById, visited = new Set()) {
 
   try {
     if (supply.type === 'purchased') {
-      const price = supply.purchase_price;
-      const qty = supply.purchase_quantity;
+      const latest = latestPurchaseMap[supply.id];
+      const price = latest ? latest.unitPrice : supply.purchase_price;
+      const qty = latest ? latest.presentationQuantity : supply.purchase_quantity;
       if (price == null || qty == null || qty <= 0) return { costPerUnit: null, totalCost: null };
       return { costPerUnit: price / qty, totalCost: null };
     }
@@ -94,7 +132,7 @@ function getSupplyCostInfo(supply, suppliesById, visited = new Set()) {
     for (const line of supply.recipe) {
       const sub = suppliesById[line.supplyId];
       if (!sub) return { costPerUnit: null, totalCost: null };
-      const subInfo = getSupplyCostInfo(sub, suppliesById, new Set(visited));
+      const subInfo = getSupplyCostInfo(sub, suppliesById, latestPurchaseMap, new Set(visited));
       if (subInfo.costPerUnit == null && subInfo.totalCost == null) return { costPerUnit: null, totalCost: null };
       const subCost = subInfo.costPerUnit;
       if (subCost == null) return { costPerUnit: null, totalCost: null };
@@ -111,6 +149,7 @@ function getSupplyCostInfo(supply, suppliesById, visited = new Set()) {
 // GET all supplies
 router.get('/', async (req, res) => {
   try {
+    const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const result = await db.query(`
       SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
       FROM supplies
@@ -124,11 +163,11 @@ router.get('/', async (req, res) => {
       const supply = suppliesById[row.id];
       let costInfo = null;
       try {
-        costInfo = getSupplyCostInfo(supply, suppliesById);
+        costInfo = getSupplyCostInfo(supply, suppliesById, latestPurchaseMap);
       } catch {
         // circular
       }
-      return rowToSupply(row, costInfo);
+      return rowToSupply(row, latestPurchaseMap, costInfo);
     });
     res.json(items);
   } catch (error) {
@@ -140,6 +179,7 @@ router.get('/', async (req, res) => {
 // GET supply by ID
 router.get('/:id', async (req, res) => {
   try {
+    const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const all = await db.query(`
       SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
       FROM supplies
@@ -154,12 +194,12 @@ router.get('/:id', async (req, res) => {
     }
     let costInfo = null;
     try {
-      costInfo = getSupplyCostInfo(supply, suppliesById);
+      costInfo = getSupplyCostInfo(supply, suppliesById, latestPurchaseMap);
     } catch {
       // circular
     }
     const row = all.rows.find((r) => r.id === req.params.id);
-    res.json(rowToSupply(row, costInfo));
+    res.json(rowToSupply(row, latestPurchaseMap, costInfo));
   } catch (error) {
     console.error('Error fetching supply:', error);
     res.status(500).json({ error: 'Error al obtener insumo' });
@@ -193,10 +233,6 @@ router.post('/', async (req, res) => {
     if (type === 'purchased') {
       if (!unit || !VALID_UNITS.includes(unit)) {
         return res.status(400).json({ error: 'purchased requiere unit (g, ml o unidad)' });
-      }
-      const qty = purchaseQuantity != null ? Number(purchaseQuantity) : null;
-      if (qty == null || isNaN(qty) || qty <= 0) {
-        return res.status(400).json({ error: 'purchased requiere purchaseQuantity > 0' });
       }
     }
 
@@ -243,13 +279,14 @@ router.post('/', async (req, res) => {
     const allRows = await db.query(
       'SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
     );
+    const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
     for (const row of allRows.rows) {
       suppliesById[row.id] = rowToSupplyInternal(row);
     }
     suppliesById[supplyId] = candidate;
     try {
-      getSupplyCostInfo(candidate, suppliesById);
+      getSupplyCostInfo(candidate, suppliesById, latestPurchaseMap);
     } catch (err) {
       if (err.message === 'Circular reference in supply recipe') {
         return res.status(400).json({ error: 'Referencia circular en la receta' });
@@ -284,11 +321,11 @@ router.post('/', async (req, res) => {
     let costInfo = null;
     try {
       const map = { ...suppliesById, [supplyId]: supplyInternal };
-      costInfo = getSupplyCostInfo(supplyInternal, map);
+      costInfo = getSupplyCostInfo(supplyInternal, map, latestPurchaseMap);
     } catch {
       // ignore
     }
-    res.status(201).json(rowToSupply(row, costInfo));
+    res.status(201).json(rowToSupply(row, latestPurchaseMap, costInfo));
   } catch (error) {
     if (error.code === '23505') {
       return res.status(409).json({ error: 'Ya existe un insumo con ese ID' });
@@ -324,10 +361,6 @@ router.put('/:id', async (req, res) => {
     if (type === 'purchased') {
       if (!unit || !VALID_UNITS.includes(unit)) {
         return res.status(400).json({ error: 'purchased requiere unit (g, ml o unidad)' });
-      }
-      const qty = purchaseQuantity != null ? Number(purchaseQuantity) : null;
-      if (qty == null || isNaN(qty) || qty <= 0) {
-        return res.status(400).json({ error: 'purchased requiere purchaseQuantity > 0' });
       }
     }
 
@@ -373,13 +406,14 @@ router.put('/:id', async (req, res) => {
     const allRows = await db.query(
       'SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
     );
+    const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
     for (const row of allRows.rows) {
       suppliesById[row.id] = rowToSupplyInternal(row);
     }
     suppliesById[id] = candidate;
     try {
-      getSupplyCostInfo(candidate, suppliesById);
+      getSupplyCostInfo(candidate, suppliesById, latestPurchaseMap);
     } catch (err) {
       if (err.message === 'Circular reference in supply recipe') {
         return res.status(400).json({ error: 'Referencia circular en la receta' });
@@ -419,11 +453,11 @@ router.put('/:id', async (req, res) => {
     const map = { ...suppliesById, [id]: supplyInternal };
     let costInfo = null;
     try {
-      costInfo = getSupplyCostInfo(supplyInternal, map);
+      costInfo = getSupplyCostInfo(supplyInternal, map, latestPurchaseMap);
     } catch {
       // ignore
     }
-    res.json(rowToSupply(row, costInfo));
+    res.json(rowToSupply(row, latestPurchaseMap, costInfo));
   } catch (error) {
     console.error('Error updating supply:', error);
     res.status(500).json({ error: 'Error al actualizar insumo' });

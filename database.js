@@ -137,7 +137,10 @@ const CREATE_TABLES = `
     supply_id TEXT NOT NULL REFERENCES supplies(id),
     supply_name TEXT NOT NULL,
     quantity DOUBLE PRECISION NOT NULL,
+    presentation_quantity DOUBLE PRECISION,
+    presentation_unit TEXT CHECK (presentation_unit IS NULL OR presentation_unit IN ('g', 'ml', 'unidad')),
     unit_price DOUBLE PRECISION NOT NULL,
+    unit_price_per_unit DOUBLE PRECISION,
     previous_price DOUBLE PRECISION
   );
 
@@ -283,6 +286,32 @@ async function initDb() {
     if (!oiColNames.includes('unit_cost')) {
       await client.query(
         'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_cost DOUBLE PRECISION',
+      );
+    }
+
+    const purchaseItemsCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'buffet_purchase_items'",
+    );
+    const purchaseItemColNames = purchaseItemsCols.rows.map((r) => r.column_name);
+    if (!purchaseItemColNames.includes('presentation_quantity')) {
+      await client.query(
+        'ALTER TABLE buffet_purchase_items ADD COLUMN IF NOT EXISTS presentation_quantity DOUBLE PRECISION',
+      );
+      await client.query(
+        'UPDATE buffet_purchase_items SET presentation_quantity = quantity WHERE presentation_quantity IS NULL',
+      );
+    }
+    if (!purchaseItemColNames.includes('presentation_unit')) {
+      await client.query(
+        "ALTER TABLE buffet_purchase_items ADD COLUMN IF NOT EXISTS presentation_unit TEXT CHECK (presentation_unit IS NULL OR presentation_unit IN ('g', 'ml', 'unidad'))",
+      );
+    }
+    if (!purchaseItemColNames.includes('unit_price_per_unit')) {
+      await client.query(
+        'ALTER TABLE buffet_purchase_items ADD COLUMN IF NOT EXISTS unit_price_per_unit DOUBLE PRECISION',
+      );
+      await client.query(
+        'UPDATE buffet_purchase_items SET unit_price_per_unit = unit_price WHERE unit_price_per_unit IS NULL',
       );
     }
 

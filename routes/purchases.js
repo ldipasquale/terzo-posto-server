@@ -17,6 +17,11 @@ function mapPurchase(row) {
       supplyId: it.supplyId,
       supplyName: it.supplyName,
       quantity: Number(it.quantity),
+      presentationQuantity:
+        it.presentationQuantity == null
+          ? Number(it.quantity)
+          : Number(it.presentationQuantity),
+      unit: it.unit || undefined,
       unitPrice: Number(it.unitPrice),
       previousPrice:
         it.previousPrice == null ? null : Number(it.previousPrice),
@@ -43,6 +48,8 @@ const purchaseSelect = `
             'supplyId', pi.supply_id,
             'supplyName', pi.supply_name,
             'quantity', pi.quantity,
+            'presentationQuantity', pi.presentation_quantity,
+            'unit', pi.presentation_unit,
             'unitPrice', pi.unit_price,
             'previousPrice', pi.previous_price
           )
@@ -112,15 +119,26 @@ router.post('/', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Ítem de compra inválido' });
       }
+      const presentationQuantity =
+        item.presentationQuantity == null
+          ? Number(item.quantity)
+          : Number(item.presentationQuantity);
+      const unit =
+        item.unit == null || ['g', 'ml', 'unidad'].includes(item.unit)
+          ? item.unit ?? null
+          : null;
       await client.query(
         `INSERT INTO buffet_purchase_items
-        (purchase_id, supply_id, supply_name, quantity, unit_price, previous_price)
-        VALUES ($1,$2,$3,$4,$5,$6)`,
+        (purchase_id, supply_id, supply_name, quantity, presentation_quantity, presentation_unit, unit_price, unit_price_per_unit, previous_price)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [
           id,
           String(item.supplyId),
           String(item.supplyName || ''),
           Number(item.quantity),
+          presentationQuantity,
+          unit,
+          Number(item.unitPrice),
           Number(item.unitPrice),
           item.previousPrice == null ? null : Number(item.previousPrice),
         ],
