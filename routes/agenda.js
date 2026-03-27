@@ -195,7 +195,14 @@ router.post('/rentals', async (req, res) => {
   try {
     const r = req.body;
     const roomId = normalizeRoomId(r?.roomId);
-    if (!r?.type || !r?.personName || !r?.activityName || !roomId) {
+    const personName = String(r?.personName ?? '').trim();
+    const requiresResponsible = r?.type !== 'one-off';
+    if (
+      !r?.type ||
+      !String(r?.activityName ?? '').trim() ||
+      !roomId ||
+      (requiresResponsible && !personName)
+    ) {
       return res.status(400).json({ error: 'Datos inválidos de alquiler' });
     }
     if (roomId === 'full-venue') {
@@ -216,7 +223,7 @@ router.post('/rentals', async (req, res) => {
       [
         id,
         r.type,
-        r.personName,
+        personName,
         r.personPhone ?? '',
         r.activityName,
         roomId,
