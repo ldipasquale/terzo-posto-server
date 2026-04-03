@@ -1,8 +1,23 @@
 import crypto from 'crypto';
 import express from 'express';
+import multer from 'multer';
 import db from '../database.js';
+import { parsePurchaseTicketImage } from '../lib/parsePurchaseTicketImage.js';
 
 const router = express.Router();
+
+const ticketUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 6 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype);
+    if (!ok) {
+      cb(new Error('Solo se permiten imágenes JPEG, PNG o WebP'));
+      return;
+    }
+    cb(null, true);
+  },
+});
 
 function mapPurchase(row) {
   const items = Array.isArray(row.items_json)
@@ -62,6 +77,45 @@ const purchaseSelect = `
     ) AS items_json
   FROM buffet_purchases p
 `;
+
+router.post(
+  '/parse-ticket',
+  (req, res, next) => {
+    ticketUpload.single('image')(req, res, (err) => {
+      if (err) {
+        const msg =
+          err.code === 'LIMIT_FILE_SIZE'
+            ? 'La imagen supera el tamaño máximo (6 MB)'
+            : err.message || 'Error al subir la imagen';
+        return res.status(400).json({ error: msg });
+      }
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      if (!req.file?.buffer) {
+        return res
+          .status(400)
+          .json({ error: 'Falta el archivo de imagen (campo image)' });
+      }
+      const result = await parsePurchaseTicketImage(
+        req.file.buffer,
+        req.file.mimetype,
+      );
+      res.json(result);
+    } catch (error) {
+      const code = error.statusCode || 500;
+      console.error('parse-ticket:', error);
+      res.status(code).json({
+        error:
+          code === 503
+            ? 'Análisis de tickets no disponible (falta configurar OPENAI_API_KEY en el servidor)'
+            : error.message || 'Error al analizar el ticket',
+      });
+    }
+  },
+);
 
 router.get('/', async (_req, res) => {
   try {

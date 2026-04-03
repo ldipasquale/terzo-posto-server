@@ -36,6 +36,11 @@ The server will start on `http://localhost:3001` by default.
 - `PUT /api/menu/:id` - Update menu item
 - `DELETE /api/menu/:id` - Delete menu item
 
+### Purchases (compras insumos)
+- `GET /api/purchases` - List purchases
+- `POST /api/purchases` - Create purchase (JSON body)
+- `POST /api/purchases/parse-ticket` - Analyze a receipt image (`multipart/form-data`, field `image`). Requires `OPENAI_API_KEY`.
+
 ### Settings
 - `GET /api/settings/mercado-pago` - Get all Mercado Pago accounts
 - `POST /api/settings/mercado-pago` - Create Mercado Pago account
@@ -58,6 +63,8 @@ The application uses PostgreSQL for data persistence. Set `DATABASE_URL` to your
 - `PORT` - Server port (default: 3001)
 - `DATABASE_URL` - PostgreSQL connection string (default: `postgresql://localhost:5432/terzo_posto`)
 - `JWT_SECRET` - Secret key for JWT tokens (default: 'terzo-posto-secret-key-change-in-production')
+- `OPENAI_API_KEY` - OpenAI API key for receipt parsing (`POST /api/purchases/parse-ticket`). If unset, that endpoint returns 503.
+- `OPENAI_VISION_MODEL` - Optional chat model with vision (default: `gpt-4o-mini`)
 
 ## Default Credentials
 
