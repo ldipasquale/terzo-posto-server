@@ -8,7 +8,7 @@ function mapLiquidityAccount(row) {
   const isCash = row.kind === 'cash' || row.id === 'efectivo';
   return {
     id: row.id,
-    name: isCash ? 'Efectivo' : `${row.alias} (${row.holder})`,
+    name: isCash ? 'Efectivo' : `${row.holder} (${row.alias})`,
     type: isCash ? 'cash' : 'partner',
     mercadoPagoAccountId: isCash ? undefined : row.id,
   };
