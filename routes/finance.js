@@ -530,4 +530,127 @@ router.get('/workshops-analysis', async (req, res) => {
   }
 });
 
+/** yyyy-MM in [startMonth, endMonth] (lexicographic ok for calendar months) */
+function rentalActiveInMonth(startMonth, endMonth, month) {
+  if (!startMonth || month < startMonth) return false;
+  if (endMonth && month > endMonth) return false;
+  return true;
+}
+
+router.get('/workshops-projection', async (req, res) => {
+  try {
+    const month = typeof req.query.month === 'string' ? req.query.month.trim() : '';
+    if (!/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ error: 'Parámetro month requerido (YYYY-MM)' });
+    }
+
+    const result = await db.query(
+      `
+      SELECT
+        r.type AS rental_type,
+        r.room_id,
+        rm.name AS room_name,
+        r.schedules,
+        r.date_slots,
+        r.price_per_hour,
+        r.fixed_price,
+        r.start_month,
+        r.end_month
+      FROM agenda_rentals r
+      LEFT JOIN agenda_rooms rm ON rm.id = r.room_id
+      WHERE r.type IN ('recurring', 'seminar')
+      `,
+    );
+
+    const roomMap = new Map();
+    const dayMap = new Map();
+    [1, 2, 3, 4, 5, 6, 0].forEach((d) => dayMap.set(d, 0));
+    let totalIncome = 0;
+
+    const addAmount = (roomId, roomName, dayOfWeek, amount) => {
+      const a = Math.round(Number(amount)) || 0;
+      if (a <= 0) return;
+      totalIncome += a;
+      roomMap.set(
+        roomId,
+        roomMap.get(roomId) || { roomId, name: roomName, amount: 0 },
+      );
+      roomMap.get(roomId).amount += a;
+      if (dayMap.has(dayOfWeek)) {
+        dayMap.set(dayOfWeek, (dayMap.get(dayOfWeek) || 0) + a);
+      }
+    };
+
+    for (const row of result.rows) {
+      const roomId = row.room_id || 'sin-sala';
+      const roomName = row.room_name || 'Sin sala';
+      const pricePerHour = Number(row.price_per_hour) || 0;
+      const fixedPrice = Number(row.fixed_price) || 0;
+
+      if (row.rental_type === 'recurring') {
+        if (!rentalActiveInMonth(row.start_month, row.end_month, month)) continue;
+        if (!pricePerHour) continue;
+        const schedules = parseJsonArray(row.schedules);
+        for (const slot of schedules) {
+          const hours = getSlotHours(slot);
+          if (hours <= 0) continue;
+          const slotAmount = Math.round(hours * 4 * pricePerHour);
+          const dow = Number(slot.dayOfWeek);
+          if (!Number.isFinite(dow)) continue;
+          addAmount(roomId, roomName, dow, slotAmount);
+        }
+      } else if (row.rental_type === 'seminar') {
+        const dateSlots = parseJsonArray(row.date_slots);
+        if (dateSlots.length === 0) continue;
+        const inMonth = dateSlots.filter((slot) => {
+          const dateStr = String(slot.date || '').slice(0, 10);
+          return dateStr.length >= 7 && dateStr.slice(0, 7) === month;
+        });
+        if (inMonth.length === 0) continue;
+
+        const totalSessions = dateSlots.length;
+
+        if (fixedPrice > 0 && totalSessions > 0) {
+          const perSession = fixedPrice / totalSessions;
+          for (const slot of inMonth) {
+            const dateStr = String(slot.date || '').slice(0, 10);
+            const d = new Date(`${dateStr}T12:00:00`);
+            if (Number.isNaN(d.getTime())) continue;
+            const dow = d.getDay();
+            addAmount(roomId, roomName, dow, perSession);
+          }
+        } else {
+          if (!pricePerHour) continue;
+          for (const slot of inMonth) {
+            const hours = getSlotHours(slot);
+            if (hours <= 0) continue;
+            const dateStr = String(slot.date || '').slice(0, 10);
+            const d = new Date(`${dateStr}T12:00:00`);
+            if (Number.isNaN(d.getTime())) continue;
+            const dow = d.getDay();
+            addAmount(roomId, roomName, dow, Math.round(hours * pricePerHour));
+          }
+        }
+      }
+    }
+
+    const byRoom = Array.from(roomMap.values())
+      .map((r) => ({ roomId: r.roomId, name: r.name, amount: Math.round(Number(r.amount)) }))
+      .sort((a, b) => b.amount - a.amount);
+    const byDay = [1, 2, 3, 4, 5, 6, 0].map((dayOfWeek) => ({
+      dayOfWeek,
+      amount: Math.round(Number(dayMap.get(dayOfWeek) || 0)),
+    }));
+
+    res.json({
+      totalIncome: Math.round(totalIncome),
+      byRoom,
+      byDay,
+    });
+  } catch (error) {
+    console.error('Error fetching workshops projection:', error);
+    res.status(500).json({ error: 'Error al obtener proyección de talleres' });
+  }
+});
+
 export default router;
