@@ -333,18 +333,48 @@ router.get('/events-profitability', async (req, res) => {
         r.activity_name,
         r.event_type,
         r.date,
-        COALESCE(SUM(CASE WHEN ap.payment_type = 'rental' THEN ap.amount ELSE 0 END), 0) AS rental_income,
-        COALESCE(SUM(CASE WHEN ap.payment_type = 'tickets' THEN ap.amount ELSE 0 END), 0) AS ticket_income,
-        COALESCE(cr.id, NULL) AS cash_register_id,
-        COALESCE(SUM(CASE WHEN o.status != 'cancelled' THEN o.total ELSE 0 END), 0) AS buffet_income,
-        COALESCE(SUM(CASE WHEN o.status != 'cancelled' THEN oi.unit_cost * oi.quantity ELSE 0 END), 0) AS buffet_cost
+        COALESCE(pay.rental_income, 0) AS rental_income,
+        COALESCE(pay.ticket_income, 0) AS ticket_income,
+        cr.id AS cash_register_id,
+        COALESCE(buff.buffet_income, 0) AS buffet_income,
+        COALESCE(buff.buffet_cost, 0) AS buffet_cost
       FROM agenda_rentals r
-      LEFT JOIN agenda_payments ap ON ap.rental_id = r.id
+      LEFT JOIN (
+        SELECT rental_id,
+          SUM(CASE WHEN payment_type = 'rental' THEN amount ELSE 0 END) AS rental_income,
+          SUM(CASE WHEN payment_type = 'tickets' THEN amount ELSE 0 END) AS ticket_income
+        FROM agenda_payments
+        GROUP BY rental_id
+      ) pay ON pay.rental_id = r.id
       LEFT JOIN cash_registers cr ON cr.event_id = r.id
-      LEFT JOIN orders o ON o.cash_register_id = cr.id
-      LEFT JOIN order_items oi ON oi.order_id = o.id
+      LEFT JOIN (
+        SELECT
+          cr.id AS cash_register_id,
+          CASE
+            WHEN cr.status = 'closed'
+              AND cr.closing_data IS NOT NULL
+              AND NULLIF(TRIM(cr.closing_data->>'totalActual'), '') IS NOT NULL
+            THEN (NULLIF(TRIM(cr.closing_data->>'totalActual'), ''))::numeric
+            ELSE COALESCE(ob.sum_orders, 0)
+          END AS buffet_income,
+          COALESCE(ob.buffet_cost, 0) AS buffet_cost
+        FROM cash_registers cr
+        LEFT JOIN (
+          SELECT o.cash_register_id,
+            SUM(CASE WHEN o.status != 'cancelled' THEN o.total ELSE 0 END) AS sum_orders,
+            SUM(
+              CASE WHEN o.status != 'cancelled' THEN COALESCE(ic.items_cost, 0) ELSE 0 END
+            ) AS buffet_cost
+          FROM orders o
+          LEFT JOIN (
+            SELECT order_id, SUM(unit_cost * quantity) AS items_cost
+            FROM order_items
+            GROUP BY order_id
+          ) ic ON ic.order_id = o.id
+          GROUP BY o.cash_register_id
+        ) ob ON ob.cash_register_id = cr.id
+      ) buff ON buff.cash_register_id = cr.id
       WHERE ${where.join(' AND ')}
-      GROUP BY r.id, r.activity_name, r.event_type, r.date, cr.id
       ORDER BY r.date DESC
       `,
       params,
