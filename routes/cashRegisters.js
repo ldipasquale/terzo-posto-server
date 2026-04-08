@@ -83,19 +83,31 @@ function formatCashRegister(row) {
 }
 
 // GET /api/cash-registers — list with optional dateFrom, dateTo
+// Incluye cajas abiertas en el rango (created_at) o cerradas en el rango (closed_at),
+// para que el historial / gráficos vean cierres aunque se hubieran abierto antes.
 router.get("/", async (req, res) => {
   try {
     const { dateFrom, dateTo } = req.query;
     const whereClauses = [];
     const params = [];
     let n = 1;
-    if (dateFrom) {
-      whereClauses.push(`created_at >= $${n++}::timestamp`);
-      params.push(dateFrom);
-    }
-    if (dateTo) {
-      whereClauses.push(`created_at < ($${n++}::timestamp::date + interval '1 day')`);
-      params.push(dateTo);
+    if (dateFrom && dateTo) {
+      whereClauses.push(`(
+        (created_at >= $${n}::timestamp AND created_at < ($${n + 1}::timestamp::date + interval '1 day'))
+        OR
+        (closed_at IS NOT NULL AND closed_at >= $${n}::timestamp AND closed_at < ($${n + 1}::timestamp::date + interval '1 day'))
+      )`);
+      params.push(dateFrom, dateTo);
+      n += 2;
+    } else {
+      if (dateFrom) {
+        whereClauses.push(`created_at >= $${n++}::timestamp`);
+        params.push(dateFrom);
+      }
+      if (dateTo) {
+        whereClauses.push(`created_at < ($${n++}::timestamp::date + interval '1 day')`);
+        params.push(dateTo);
+      }
     }
     const where = whereClauses.length ? "WHERE " + whereClauses.join(" AND ") : "";
     const result = await db.query(
