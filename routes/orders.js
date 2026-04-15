@@ -20,7 +20,8 @@ const orderSelectWithItems = `
         'unitCost', oi.unit_cost
       ),
       'quantity', oi.quantity,
-      'notes', oi.notes
+      'notes', oi.notes,
+      'isDelivered', oi.is_delivered
     )), '[]'::json)
     FROM order_items oi WHERE oi.order_id = o.id) AS items_json
   FROM orders o
@@ -49,9 +50,11 @@ function formatOrder(order) {
         menuItem.unitCost = Number(mi.unitCost);
       }
       return {
+        id: item.id,
         menuItem,
         quantity: item.quantity,
         notes: item.notes || undefined,
+        isDelivered: Boolean(item.isDelivered),
       };
     }),
     total: Number(order.total),
@@ -326,8 +329,8 @@ router.post('/', async (req, res) => {
       for (const item of items) {
         const unitCost = unitCostMap.get(item.menuItem.id) ?? null;
         await client.query(
-          `INSERT INTO order_items (order_id, menu_item_id, name, description, price, category, type, quantity, notes, unit_cost)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+          `INSERT INTO order_items (order_id, menu_item_id, name, description, price, category, type, quantity, notes, unit_cost, is_delivered)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
           [
             orderId,
             item.menuItem.id,
@@ -339,6 +342,7 @@ router.post('/', async (req, res) => {
             item.quantity,
             item.notes || null,
             unitCost,
+            false,
           ],
         );
       }
@@ -394,6 +398,110 @@ router.patch('/:id/status', async (req, res) => {
   } catch (error) {
     console.error('Error updating order:', error);
     res.status(500).json({ error: 'Error al actualizar el pedido' });
+  }
+});
+
+// Update a single order item delivered state
+router.patch('/:id/items/:itemId/delivered', async (req, res) => {
+  try {
+    const id = req.params.id.startsWith('#')
+      ? req.params.id
+      : `#${req.params.id}`;
+    const itemId = Number(req.params.itemId);
+    const { isDelivered } = req.body;
+
+    if (!Number.isInteger(itemId) || itemId <= 0) {
+      return res.status(400).json({ error: 'itemId inválido' });
+    }
+    if (typeof isDelivered !== 'boolean') {
+      return res.status(400).json({ error: 'isDelivered debe ser boolean' });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+
+      const orderStatusResult = await client.query(
+        `SELECT status FROM orders WHERE id = $1`,
+        [id],
+      );
+      if (orderStatusResult.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Pedido no encontrado' });
+      }
+      const orderStatus = orderStatusResult.rows[0].status;
+      const canToggleInPending = orderStatus === 'pending';
+      const canUncheckInDelivered = orderStatus === 'delivered' && isDelivered === false;
+      if (!canToggleInPending && !canUncheckInDelivered) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({
+          error:
+            'Solo se puede editar items en pendientes, o destachar en entregados',
+        });
+      }
+
+      const itemResult = await client.query(
+        `UPDATE order_items
+         SET is_delivered = $1
+         WHERE id = $2 AND order_id = $3
+         RETURNING id`,
+        [isDelivered, itemId, id],
+      );
+
+      if (itemResult.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Item de pedido no encontrado' });
+      }
+
+      const countsResult = await client.query(
+        `SELECT
+           COUNT(*)::int AS total_items,
+           COUNT(*) FILTER (WHERE is_delivered) ::int AS delivered_items
+         FROM order_items
+         WHERE order_id = $1`,
+        [id],
+      );
+
+      const totals = countsResult.rows[0];
+      const allDelivered =
+        totals.total_items > 0 && totals.delivered_items === totals.total_items;
+
+      if (allDelivered) {
+        await client.query(
+          `UPDATE orders
+           SET status = 'delivered', updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1`,
+          [id],
+        );
+      } else {
+        // If any item is unmarked again, keep the order open.
+        await client.query(
+          `UPDATE orders
+           SET status = 'pending', updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1 AND status = 'delivered'`,
+          [id],
+        );
+      }
+
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    const orderResult = await db.query(`${orderSelectWithItems} WHERE o.id = $1`, [
+      id,
+    ]);
+    if (orderResult.rowCount === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+
+    res.json(formatOrder(orderResult.rows[0]));
+  } catch (error) {
+    console.error('Error updating delivered item state:', error);
+    res.status(500).json({ error: 'Error al actualizar el item del pedido' });
   }
 });
 

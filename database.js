@@ -94,7 +94,8 @@ const CREATE_TABLES = `
     type TEXT NOT NULL,
     quantity INTEGER NOT NULL,
     notes TEXT,
-    unit_cost DOUBLE PRECISION
+    unit_cost DOUBLE PRECISION,
+    is_delivered BOOLEAN NOT NULL DEFAULT FALSE
   );
 
   CREATE TABLE IF NOT EXISTS settings (
@@ -286,6 +287,11 @@ async function initDb() {
     if (!oiColNames.includes('unit_cost')) {
       await client.query(
         'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_cost DOUBLE PRECISION',
+      );
+    }
+    if (!oiColNames.includes('is_delivered')) {
+      await client.query(
+        'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS is_delivered BOOLEAN NOT NULL DEFAULT FALSE',
       );
     }
 
