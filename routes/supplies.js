@@ -25,7 +25,7 @@ function normalizeRecipeLine(line) {
   return { supplyId: String(supplyId), quantity: Number(line.quantity) };
 }
 
-async function getLatestPurchasedValuesMap(client) {
+export async function getLatestPurchasedValuesMap(client) {
   const result = await client.query(`
     SELECT DISTINCT ON (pi.supply_id)
       pi.supply_id,

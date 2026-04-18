@@ -6,7 +6,10 @@
     "dev": "node --watch server.js",
     "start": "node server.js",
     "migrate:march-2026-finances": "node scripts/migrate-march-2026-finances.mjs",
-    "clear:finance-transactions": "node scripts/clear-finance-transactions.mjs"
+    "clear:finance-transactions": "node scripts/clear-finance-transactions.mjs",
+    "backfill:order-item-unit-costs": "node scripts/backfill-order-item-unit-costs.mjs",
+    "list:menu-without-cost": "node scripts/list-menu-items-without-cost.mjs",
+    "set:hardcoded-order-item-costs": "node scripts/set-hardcoded-order-item-unit-costs.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

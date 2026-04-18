@@ -199,6 +199,47 @@ router.post('/', async (req, res) => {
       );
     }
 
+    const financeAccountId =
+      p.paymentMethod === 'efectivo'
+        ? 'efectivo'
+        : p.mercadoPagoAccountId != null && String(p.mercadoPagoAccountId).trim()
+          ? String(p.mercadoPagoAccountId).trim()
+          : null;
+    if (p.paymentMethod === 'mercadopago' && !financeAccountId) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Cuenta de Mercado Pago requerida' });
+    }
+    const accCheck = await client.query(
+      'SELECT 1 FROM mercado_pago_accounts WHERE id = $1',
+      [financeAccountId],
+    );
+    if (accCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Cuenta de pago inválida' });
+    }
+
+    const desc =
+      provider
+        ? `Compra: ${provider}${notes ? ` — ${notes}` : ''}`
+        : `Compra de insumos${notes ? ` — ${notes}` : ''}`;
+    const financeCategory =
+      p.category === 'comida' ? 'insumos-comida' : 'insumos-bebida';
+    const txId = crypto.randomUUID();
+    await client.query(
+      `INSERT INTO finance_transactions
+      (id, account_id, type, amount, description, source, category, reference_id, date)
+      VALUES ($1, $2, 'expense', $3, $4, 'buffet', $5, $6, $7)`,
+      [
+        txId,
+        financeAccountId,
+        total,
+        desc,
+        financeCategory,
+        id,
+        date,
+      ],
+    );
+
     await client.query('COMMIT');
     const created = await db.query(`${purchaseSelect} WHERE p.id = $1`, [id]);
     res.status(201).json(mapPurchase(created.rows[0]));
@@ -206,6 +247,38 @@ router.post('/', async (req, res) => {
     await client.query('ROLLBACK');
     console.error('Error creating purchase:', error);
     res.status(500).json({ error: 'Error al crear compra' });
+  } finally {
+    client.release();
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  const id = req.params.id;
+  if (!id || typeof id !== 'string') {
+    return res.status(400).json({ error: 'Id inválido' });
+  }
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const exists = await client.query(
+      'SELECT 1 FROM buffet_purchases WHERE id = $1',
+      [id],
+    );
+    if (exists.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Compra no encontrada' });
+    }
+    await client.query(
+      `DELETE FROM finance_transactions WHERE reference_id = $1 AND source = 'buffet'`,
+      [id],
+    );
+    await client.query('DELETE FROM buffet_purchases WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    res.status(204).send();
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error deleting purchase:', error);
+    res.status(500).json({ error: 'Error al eliminar compra' });
   } finally {
     client.release();
   }
