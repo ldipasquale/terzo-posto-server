@@ -31,7 +31,14 @@ router.get('/', async (req, res) => {
         [row.id]
       );
       const orderIds = orders.rows.map((o) => o.id);
-      const total = orders.rows.reduce((sum, o) => sum + Number(o.total), 0);
+      let total = orders.rows.reduce((sum, o) => sum + Number(o.total), 0);
+      const cupCredit = await db.query(
+        `SELECT COALESCE(SUM(amount), 0)::float AS s FROM cup_movements
+         WHERE type = 'return' AND payment_method = 'cuenta_abierta' AND open_account_id = $1`,
+        [row.id]
+      );
+      const credit = Number(cupCredit.rows[0]?.s) || 0;
+      total = Math.max(0, total - credit);
       result.push({
         id: row.id,
         customerName: row.name,

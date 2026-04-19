@@ -510,6 +510,49 @@ async function initDb() {
         'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_register_id TEXT REFERENCES cash_registers(id)',
       );
     }
+    if (!ordersColNames.includes('cups_delivered')) {
+      await client.query(
+        'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cups_delivered INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+
+    const cupMovementsExists =
+      (
+        await client.query(
+          "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'cup_movements'",
+        )
+      ).rows.length > 0;
+    if (!cupMovementsExists) {
+      await client.query(`
+        CREATE TABLE cup_movements (
+          id TEXT PRIMARY KEY,
+          cash_register_id TEXT NOT NULL REFERENCES cash_registers(id),
+          type TEXT NOT NULL CHECK (type IN ('delivery', 'return')),
+          quantity INTEGER NOT NULL CHECK (quantity > 0),
+          amount DOUBLE PRECISION NOT NULL,
+          payment_method TEXT CHECK (
+            payment_method IS NULL OR payment_method IN ('efectivo', 'mercadopago', 'cuenta_abierta')
+          ),
+          mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+          open_account_id TEXT REFERENCES open_accounts(id),
+          order_id TEXT REFERENCES orders(id) ON DELETE SET NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      await client.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS cup_movements_one_delivery_per_order
+        ON cup_movements (order_id)
+        WHERE type = 'delivery' AND order_id IS NOT NULL
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_cup_movements_cash_register_id
+        ON cup_movements(cash_register_id)
+      `);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_cup_movements_order_id
+        ON cup_movements(order_id)
+      `);
+    }
 
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_agenda_rentals_date ON agenda_rentals(date);

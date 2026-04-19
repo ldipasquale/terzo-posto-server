@@ -1,6 +1,8 @@
 import express from 'express';
+import crypto from 'crypto';
 import db from '../database.js';
 import { getUnitCostsForMenuItemIds } from '../lib/menuItemCost.js';
+import { getCupPrice } from '../lib/cupPrice.js';
 
 const router = express.Router();
 
@@ -69,6 +71,10 @@ function formatOrder(order) {
     discountReason: order.discount_reason || undefined,
     notes: order.notes || undefined,
     createdAt: new Date(order.created_at).toISOString(),
+    cupsDelivered:
+      order.cups_delivered != null && order.cups_delivered !== ''
+        ? Number(order.cups_delivered)
+        : 0,
   };
 }
 
@@ -232,16 +238,22 @@ router.post('/', async (req, res) => {
       discountReason,
       notes,
       openAccountId,
+      cupsDelivered: rawCups,
     } = req.body;
 
-    if (
-      !customerName ||
-      !items ||
-      !Array.isArray(items) ||
-      items.length === 0 ||
-      total === undefined
-    ) {
+    const cupsDelivered =
+      rawCups != null && rawCups !== ''
+        ? Math.max(0, Math.floor(Number(rawCups)))
+        : 0;
+
+    if (!customerName || !items || !Array.isArray(items) || total === undefined) {
       return res.status(400).json({ error: 'Datos del pedido incompletos' });
+    }
+
+    if (items.length === 0 && cupsDelivered <= 0) {
+      return res
+        .status(400)
+        .json({ error: 'La comanda debe incluir ítems o vasos entregados' });
     }
 
     const isOpenAccount = paymentMethod === 'cuenta_abierta' || openAccountId;
@@ -262,15 +274,72 @@ router.post('/', async (req, res) => {
         .json({ error: 'openAccountId es requerido para cuenta abierta' });
     }
 
+    if (cupsDelivered > 0 && !cashRegisterId) {
+      return res.status(400).json({
+        error: 'cashRegisterId es requerido cuando hay vasos entregados',
+      });
+    }
+
     if (effectivePaymentMethod === 'cuenta_abierta' && openAccountId) {
       const accountCheck = await db.query(
-        'SELECT id FROM open_accounts WHERE id = $1 AND status = $2',
+        'SELECT id, cash_register_id FROM open_accounts WHERE id = $1 AND status = $2',
         [openAccountId, 'open'],
       );
       if (accountCheck.rows.length === 0) {
         return res
           .status(400)
           .json({ error: 'Cuenta abierta no encontrada o ya cerrada' });
+      }
+      if (
+        cashRegisterId &&
+        accountCheck.rows[0].cash_register_id !== cashRegisterId
+      ) {
+        return res.status(400).json({
+          error: 'La cuenta abierta no pertenece a esta caja',
+        });
+      }
+    }
+
+    const cupPrice = getCupPrice();
+    let itemsSubtotal = 0;
+    for (const item of items) {
+      if (!item?.menuItem?.id || item.quantity == null) {
+        return res.status(400).json({ error: 'Ítem de pedido inválido' });
+      }
+      const qty = Math.floor(Number(item.quantity));
+      if (!Number.isFinite(qty) || qty <= 0) {
+        return res.status(400).json({ error: 'Cantidad de ítem inválida' });
+      }
+      const price = Number(item.menuItem.price);
+      if (!Number.isFinite(price)) {
+        return res.status(400).json({ error: 'Precio de ítem inválido' });
+      }
+      itemsSubtotal += price * qty;
+    }
+
+    const cupsAmount = cupPrice * cupsDelivered;
+    const discountNum =
+      discount != null && discount !== '' ? Number(discount) : 0;
+    const expectedTotal = Math.max(0, itemsSubtotal + cupsAmount - discountNum);
+    const clientTotal = Number(total);
+    if (!Number.isFinite(clientTotal)) {
+      return res.status(400).json({ error: 'total inválido' });
+    }
+    if (Math.abs(clientTotal - expectedTotal) > 0.02) {
+      return res.status(400).json({
+        error: 'El total no coincide con ítems, vasos y descuento',
+      });
+    }
+
+    if (cupsDelivered > 0) {
+      const cr = await db.query(
+        'SELECT id, status FROM cash_registers WHERE id = $1',
+        [cashRegisterId],
+      );
+      if (!cr.rows[0] || cr.rows[0].status !== 'open') {
+        return res.status(400).json({
+          error: 'La caja debe estar abierta para registrar vasos',
+        });
       }
     }
 
@@ -307,12 +376,12 @@ router.post('/', async (req, res) => {
       );
 
       await client.query(
-        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, cash_register_id, open_account_id, discount, discount_reason, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, cash_register_id, open_account_id, discount, discount_reason, notes, cups_delivered)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
         [
           orderId,
           customerName,
-          total,
+          clientTotal,
           status || 'pending',
           effectivePaymentMethod,
           effectivePaymentMethod === 'mercadopago'
@@ -323,6 +392,7 @@ router.post('/', async (req, res) => {
           discount ?? null,
           discountReason ?? null,
           notes ?? null,
+          cupsDelivered,
         ],
       );
 
@@ -344,6 +414,17 @@ router.post('/', async (req, res) => {
             unitCost,
             false,
           ],
+        );
+      }
+
+      if (cupsDelivered > 0) {
+        const movementId = crypto.randomUUID();
+        await client.query(
+          `INSERT INTO cup_movements (
+            id, cash_register_id, type, quantity, amount,
+            payment_method, mercado_pago_account_id, open_account_id, order_id
+          ) VALUES ($1, $2, 'delivery', $3, $4, NULL, NULL, NULL, $5)`,
+          [movementId, cashRegisterId, cupsDelivered, cupsAmount, orderId],
         );
       }
 
