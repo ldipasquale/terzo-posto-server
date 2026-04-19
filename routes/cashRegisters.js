@@ -17,6 +17,42 @@ async function assertMercadoPagoLiquidityAccount(client, mercadoPagoAccountId) {
 }
 
 /**
+ * Agregados de vasos retornables para una caja (cup_movements).
+ * Si la tabla no existe aún, devuelve ceros.
+ */
+async function getCupSummaryForCashRegister(client, cashRegisterId) {
+  try {
+    const r = await client.query(
+      `SELECT
+        COALESCE(SUM(CASE WHEN type = 'delivery' THEN quantity ELSE 0 END), 0)::int AS delivered,
+        COALESCE(SUM(CASE WHEN type = 'return' THEN quantity ELSE 0 END), 0)::int AS returned,
+        COALESCE(SUM(CASE WHEN type = 'delivery' THEN amount ELSE 0 END), 0)::float AS delivery_amount,
+        COALESCE(SUM(CASE WHEN type = 'return' THEN amount ELSE 0 END), 0)::float AS return_amount
+       FROM cup_movements WHERE cash_register_id = $1`,
+      [cashRegisterId],
+    );
+    const row = r.rows[0];
+    const delivered = Number(row.delivered) || 0;
+    const returned = Number(row.returned) || 0;
+    return {
+      delivered,
+      returned,
+      netNotReturned: Math.max(0, delivered - returned),
+      deliveryAmountTotal: Number(row.delivery_amount) || 0,
+      returnAmountTotal: Number(row.return_amount) || 0,
+    };
+  } catch {
+    return {
+      delivered: 0,
+      returned: 0,
+      netNotReturned: 0,
+      deliveryAmountTotal: 0,
+      returnAmountTotal: 0,
+    };
+  }
+}
+
+/**
  * Una transacción de ingreso por cada medio de pago del cierre (monto = actual neto).
  */
 async function insertBuffetCloseTransactions(client, cashRegisterId, closingData, eventName) {
@@ -218,15 +254,20 @@ router.patch("/:id/close", async (req, res) => {
     const client = await db.connect();
     try {
       await client.query("BEGIN");
+      const cupsSummary = await getCupSummaryForCashRegister(client, id);
+      const mergedClosingData = {
+        ...closingData,
+        cupsSummary,
+      };
       await insertBuffetCloseTransactions(
         client,
         id,
-        closingData,
+        mergedClosingData,
         caja.event_name
       );
       await client.query(
         `UPDATE cash_registers SET status = 'closed', closed_at = $1, closing_data = $2 WHERE id = $3`,
-        [now, JSON.stringify(closingData), id]
+        [now, JSON.stringify(mergedClosingData), id]
       );
       await client.query("COMMIT");
     } catch (e) {
