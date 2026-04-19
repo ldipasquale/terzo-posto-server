@@ -1,7 +1,46 @@
 import express from 'express';
 import db from '../database.js';
+import {
+  getCupPrice,
+  invalidateCupPriceCache,
+  BUFFET_CUP_PRICE_SETTINGS_KEY,
+} from '../lib/cupPrice.js';
 
 const router = express.Router();
+
+/** Buffet: precio depósito vasos retornables (ARS) */
+router.get('/buffet', async (_req, res) => {
+  try {
+    const cupPrice = await getCupPrice();
+    res.json({ cupPrice });
+  } catch (error) {
+    console.error('Error fetching buffet settings:', error);
+    res.status(500).json({ error: 'Error al obtener la configuración del buffet' });
+  }
+});
+
+router.put('/buffet', async (req, res) => {
+  try {
+    const raw = req.body?.cupPrice;
+    const n = Math.round(Number(raw));
+    if (!Number.isFinite(n) || n < 1 || n > 1_000_000) {
+      return res.status(400).json({
+        error: 'Precio inválido: ingresá un entero entre 1 y 1.000.000',
+      });
+    }
+    await db.query(
+      `INSERT INTO settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
+      [BUFFET_CUP_PRICE_SETTINGS_KEY, String(n)],
+    );
+    invalidateCupPriceCache();
+    res.json({ cupPrice: n });
+  } catch (error) {
+    console.error('Error updating buffet settings:', error);
+    res.status(500).json({ error: 'Error al guardar la configuración del buffet' });
+  }
+});
 
 // Get all Mercado Pago accounts
 router.get('/mercado-pago', async (req, res) => {

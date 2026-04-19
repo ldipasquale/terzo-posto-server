@@ -300,7 +300,7 @@ router.post('/', async (req, res) => {
       }
     }
 
-    const cupPrice = getCupPrice();
+    const cupPrice = await getCupPrice();
     let itemsSubtotal = 0;
     for (const item of items) {
       if (!item?.menuItem?.id || item.quantity == null) {

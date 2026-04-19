@@ -126,7 +126,7 @@ router.post('/return', async (req, res) => {
         .json({ error: 'openAccountId requerido para cuenta abierta' });
     }
 
-    const cupPrice = getCupPrice();
+    const cupPrice = await getCupPrice();
     const amount = cupPrice * quantity;
     const movementId = crypto.randomUUID();
     const now = new Date().toISOString();
