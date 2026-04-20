@@ -111,6 +111,10 @@ function formatCashRegister(row) {
     eventId: row.event_id || undefined,
     eventName: row.event_name || undefined,
     startingCash: row.starting_cash != null ? Number(row.starting_cash) : undefined,
+    mpStartingBalance:
+      row.mp_starting_balance != null && Number.isFinite(Number(row.mp_starting_balance))
+        ? Number(row.mp_starting_balance)
+        : undefined,
     status: row.status,
     closedAt: row.closed_at ? new Date(row.closed_at).toISOString() : undefined,
     closingData: row.closing_data || undefined,
@@ -177,7 +181,8 @@ router.get("/current", async (req, res) => {
 // POST /api/cash-registers — open a new cash register
 router.post("/", async (req, res) => {
   try {
-    const { mercadoPagoAccountId, eventId, eventName, startingCash } = req.body;
+    const { mercadoPagoAccountId, eventId, eventName, startingCash, mpStartingBalance } =
+      req.body;
     if (!mercadoPagoAccountId) {
       return res.status(400).json({ error: "Cuenta de Mercado Pago es requerida" });
     }
@@ -194,14 +199,33 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Ya hay una caja abierta" });
     }
 
+    let mpStartingBalanceDb = null;
+    if (mpStartingBalance != null && mpStartingBalance !== "") {
+      const n = Number(mpStartingBalance);
+      if (!Number.isFinite(n) || n < 0) {
+        return res.status(400).json({
+          error: "mpStartingBalance debe ser un número mayor o igual a 0",
+        });
+      }
+      mpStartingBalanceDb = n;
+    }
+
     const id = crypto.randomUUID();
     const now = new Date();
     const date = now.toISOString().split("T")[0];
 
     await db.query(
-      `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'open')`,
-      [id, date, mercadoPagoAccountId, eventId || null, eventName || null, startingCash ?? null]
+      `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')`,
+      [
+        id,
+        date,
+        mercadoPagoAccountId,
+        eventId || null,
+        eventName || null,
+        startingCash ?? null,
+        mpStartingBalanceDb,
+      ]
     );
 
     const result = await db.query("SELECT * FROM cash_registers WHERE id = $1", [id]);

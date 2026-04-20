@@ -107,7 +107,9 @@ const CREATE_TABLES = `
     quantity INTEGER NOT NULL,
     notes TEXT,
     unit_cost DOUBLE PRECISION,
-    is_delivered BOOLEAN NOT NULL DEFAULT FALSE
+    is_delivered BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS settings (
@@ -306,6 +308,31 @@ async function initDb() {
         'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS is_delivered BOOLEAN NOT NULL DEFAULT FALSE',
       );
     }
+    if (!oiColNames.includes('created_at')) {
+      await client.query(
+        'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP',
+      );
+    }
+    if (!oiColNames.includes('delivered_at')) {
+      await client.query(
+        'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP',
+      );
+    }
+    await client.query(`
+      UPDATE order_items oi
+      SET created_at = o.created_at
+      FROM orders o
+      WHERE oi.order_id = o.id
+        AND (oi.created_at IS NULL OR oi.created_at > o.created_at)
+    `);
+    await client.query(`
+      UPDATE order_items oi
+      SET delivered_at = o.updated_at
+      FROM orders o
+      WHERE oi.order_id = o.id
+        AND oi.is_delivered = TRUE
+        AND oi.delivered_at IS NULL
+    `);
 
     const purchaseItemsCols = await client.query(
       "SELECT column_name FROM information_schema.columns WHERE table_name = 'buffet_purchase_items'",
@@ -629,6 +656,11 @@ async function initDb() {
     if (!cashRegisterColNames.includes('event_id')) {
       await client.query(
         'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS event_id TEXT',
+      );
+    }
+    if (!cashRegisterColNames.includes('mp_starting_balance')) {
+      await client.query(
+        'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS mp_starting_balance DOUBLE PRECISION',
       );
     }
     if (!ordersColNames.includes('cash_register_id')) {

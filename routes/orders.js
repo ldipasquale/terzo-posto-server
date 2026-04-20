@@ -23,7 +23,9 @@ const orderSelectWithItems = `
       ),
       'quantity', oi.quantity,
       'notes', oi.notes,
-      'isDelivered', oi.is_delivered
+      'isDelivered', oi.is_delivered,
+      'createdAt', oi.created_at,
+      'deliveredAt', oi.delivered_at
     )), '[]'::json)
     FROM order_items oi WHERE oi.order_id = o.id) AS items_json
   FROM orders o
@@ -57,6 +59,12 @@ function formatOrder(order) {
         quantity: item.quantity,
         notes: item.notes || undefined,
         isDelivered: Boolean(item.isDelivered),
+        createdAt: item.createdAt
+          ? new Date(item.createdAt).toISOString()
+          : undefined,
+        deliveredAt: item.deliveredAt
+          ? new Date(item.deliveredAt).toISOString()
+          : undefined,
       };
     }),
     total: Number(order.total),
@@ -71,6 +79,9 @@ function formatOrder(order) {
     discountReason: order.discount_reason || undefined,
     notes: order.notes || undefined,
     createdAt: new Date(order.created_at).toISOString(),
+    updatedAt: order.updated_at
+      ? new Date(order.updated_at).toISOString()
+      : undefined,
     cupsDelivered:
       order.cups_delivered != null && order.cups_delivered !== ''
         ? Number(order.cups_delivered)
@@ -398,23 +409,39 @@ router.post('/', async (req, res) => {
 
       for (const item of items) {
         const unitCost = unitCostMap.get(item.menuItem.id) ?? null;
-        await client.query(
-          `INSERT INTO order_items (order_id, menu_item_id, name, description, price, category, type, quantity, notes, unit_cost, is_delivered)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-          [
-            orderId,
-            item.menuItem.id,
-            item.menuItem.name,
-            item.menuItem.description,
-            item.menuItem.price,
-            item.menuItem.category,
-            item.menuItem.type,
-            item.quantity,
-            item.notes || null,
-            unitCost,
-            false,
-          ],
-        );
+        const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+        const type = item.menuItem.type;
+
+        // Comida se guarda por unidad para permitir entrega individual
+        // sin tener que desdoblar filas al momento de marcar "entregado".
+        const rowsToInsert = type === 'comida' ? qty : 1;
+        const quantityPerRow = type === 'comida' ? 1 : qty;
+
+        for (let i = 0; i < rowsToInsert; i++) {
+          await client.query(
+            `INSERT INTO order_items (
+               order_id, menu_item_id, name, description, price, category, type,
+               quantity, notes, unit_cost, is_delivered, created_at, delivered_at
+             )
+             VALUES (
+               $1, $2, $3, $4, $5, $6, $7,
+               $8, $9, $10, $11, CURRENT_TIMESTAMP, NULL
+             )`,
+            [
+              orderId,
+              item.menuItem.id,
+              item.menuItem.name,
+              item.menuItem.description,
+              item.menuItem.price,
+              item.menuItem.category,
+              type,
+              quantityPerRow,
+              item.notes || null,
+              unitCost,
+              false,
+            ],
+          );
+        }
       }
 
       if (cupsDelivered > 0) {
@@ -471,6 +498,16 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
 
+    if (status === 'delivered') {
+      await db.query(
+        `UPDATE order_items
+         SET is_delivered = TRUE,
+             delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+         WHERE order_id = $1`,
+        [id],
+      );
+    }
+
     const orderResult = await db.query(
       `${orderSelectWithItems} WHERE o.id = $1`,
       [id],
@@ -522,22 +559,96 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
       }
 
       const itemResult = await client.query(
-        `UPDATE order_items
-         SET is_delivered = $1
-         WHERE id = $2 AND order_id = $3
-         RETURNING id`,
-        [isDelivered, itemId, id],
+        `SELECT
+           id,
+           order_id,
+           menu_item_id,
+           name,
+           description,
+           price,
+           category,
+           type,
+           quantity,
+           notes,
+           unit_cost,
+           is_delivered,
+           created_at,
+           delivered_at
+         FROM order_items
+         WHERE id = $1 AND order_id = $2
+         FOR UPDATE`,
+        [itemId, id],
       );
 
       if (itemResult.rowCount === 0) {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Item de pedido no encontrado' });
       }
+      const item = itemResult.rows[0];
+
+      // Unit-level delivery toggle:
+      // when quantity > 1, split one unit into a new row with target delivered state.
+      if (Number(item.quantity) > 1) {
+        if (Boolean(item.is_delivered) === isDelivered) {
+          // No-op toggle (stale click), continue without mutating.
+        } else {
+          await client.query(
+            `UPDATE order_items
+             SET quantity = quantity - 1
+             WHERE id = $1`,
+            [itemId],
+          );
+          await client.query(
+            `INSERT INTO order_items (
+               order_id,
+               menu_item_id,
+               name,
+               description,
+               price,
+               category,
+               type,
+               quantity,
+               notes,
+               unit_cost,
+               is_delivered,
+               created_at,
+               delivered_at
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10, $11, $12
+             )`,
+            [
+              item.order_id,
+              item.menu_item_id,
+              item.name,
+              item.description,
+              item.price,
+              item.category,
+              item.type,
+              item.notes ?? null,
+              item.unit_cost,
+              isDelivered,
+              item.created_at,
+              isDelivered ? new Date().toISOString() : null,
+            ],
+          );
+        }
+      } else {
+        await client.query(
+          `UPDATE order_items
+           SET is_delivered = $1,
+               delivered_at = CASE
+                 WHEN $1 THEN COALESCE(delivered_at, CURRENT_TIMESTAMP)
+                 ELSE NULL
+               END
+           WHERE id = $2 AND order_id = $3`,
+          [isDelivered, itemId, id],
+        );
+      }
 
       const countsResult = await client.query(
         `SELECT
-           COUNT(*)::int AS total_items,
-           COUNT(*) FILTER (WHERE is_delivered) ::int AS delivered_items
+           COALESCE(SUM(quantity), 0)::int AS total_items,
+           COALESCE(SUM(CASE WHEN is_delivered THEN quantity ELSE 0 END), 0)::int AS delivered_items
          FROM order_items
          WHERE order_id = $1`,
         [id],
