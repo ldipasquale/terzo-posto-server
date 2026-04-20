@@ -1,4 +1,5 @@
 import pg from 'pg';
+import bcrypt from 'bcryptjs';
 
 const { Pool } = pg;
 
@@ -36,6 +37,17 @@ const CREATE_TABLES = `
     active SMALLINT NOT NULL DEFAULT 1,
     kind TEXT NOT NULL DEFAULT 'mercadopago' CHECK (kind IN ('cash', 'mercadopago')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS app_users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    default_mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+    active SMALLINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS cash_registers (
@@ -347,6 +359,120 @@ async function initDb() {
       VALUES ('efectivo', 'Efectivo', 'Efectivo', 0, 1, 'cash')
       ON CONFLICT (id) DO UPDATE SET kind = 'cash', holder = EXCLUDED.holder, alias = EXCLUDED.alias
     `);
+
+    const appUsersCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'app_users'",
+    );
+    const appUsersColNames = appUsersCols.rows.map((r) => r.column_name);
+    if (!appUsersColNames.includes('default_mercado_pago_account_id')) {
+      await client.query(
+        'ALTER TABLE app_users ADD COLUMN IF NOT EXISTS default_mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id)',
+      );
+    }
+    if (!appUsersColNames.includes('active')) {
+      await client.query(
+        'ALTER TABLE app_users ADD COLUMN IF NOT EXISTS active SMALLINT NOT NULL DEFAULT 1',
+      );
+    }
+    if (!appUsersColNames.includes('updated_at')) {
+      await client.query(
+        'ALTER TABLE app_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
+      );
+    }
+
+    const findMpAccountByHolder = async (holderCandidates) => {
+      for (const holder of holderCandidates) {
+        const account = await client.query(
+          `SELECT id
+           FROM mercado_pago_accounts
+           WHERE COALESCE(kind, 'mercadopago') = 'mercadopago'
+             AND active = 1
+             AND holder ILIKE $1
+           ORDER BY is_default DESC, created_at ASC
+           LIMIT 1`,
+          [holder],
+        );
+        if (account.rows[0]) return account.rows[0].id;
+      }
+      return null;
+    };
+
+    const fixedUsers = [
+      {
+        id: 'user-luli',
+        name: 'Luli',
+        email: 'lulyhoch@gmail.com',
+        password: 'dodi',
+        holderCandidates: ['%Luli%', '%luli%'],
+      },
+      {
+        id: 'user-bachi',
+        name: 'Bachi',
+        email: 'bfilgueira98@gmail.com',
+        password: 'bayi',
+        holderCandidates: ['%Bachi%', '%bfilgueira%', '%Filgueira%'],
+      },
+      {
+        id: 'user-lucho',
+        name: 'Lucho',
+        email: 'yolucianodipasquale@gmail.com',
+        password: 'usho',
+        holderCandidates: ['%Lucho%', '%Luciano%', '%Dipasquale%'],
+      },
+    ];
+
+    for (const fixedUser of fixedUsers) {
+      const mpAccountId = await findMpAccountByHolder(fixedUser.holderCandidates);
+      const existingUser = await client.query(
+        `SELECT id, password_hash
+         FROM app_users
+         WHERE email = $1`,
+        [fixedUser.email],
+      );
+
+      if (!existingUser.rows[0]) {
+        const passwordHash = await bcrypt.hash(fixedUser.password, 10);
+        await client.query(
+          `INSERT INTO app_users
+             (id, name, email, password_hash, default_mercado_pago_account_id, active, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [
+            fixedUser.id,
+            fixedUser.name,
+            fixedUser.email,
+            passwordHash,
+            mpAccountId,
+          ],
+        );
+        continue;
+      }
+
+      const shouldUpdatePassword = !(
+        existingUser.rows[0].password_hash &&
+        (await bcrypt.compare(fixedUser.password, existingUser.rows[0].password_hash))
+      );
+      const nextPasswordHash = shouldUpdatePassword
+        ? await bcrypt.hash(fixedUser.password, 10)
+        : existingUser.rows[0].password_hash;
+
+      await client.query(
+        `UPDATE app_users
+         SET id = $1,
+             name = $2,
+             password_hash = $3,
+             default_mercado_pago_account_id = $4,
+             active = 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE email = $5`,
+        [
+          fixedUser.id,
+          fixedUser.name,
+          nextPasswordHash,
+          mpAccountId,
+          fixedUser.email,
+        ],
+      );
+    }
 
     const financeAccountsExists =
       (
