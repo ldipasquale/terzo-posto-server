@@ -129,7 +129,6 @@ router.post('/return', async (req, res) => {
     const cupPrice = await getCupPrice();
     const amount = cupPrice * quantity;
     const movementId = crypto.randomUUID();
-    const now = new Date().toISOString();
 
     const client = await db.connect();
     try {
@@ -182,6 +181,12 @@ router.post('/return', async (req, res) => {
         }
       }
 
+      if (paymentMethod === 'mercadopago') {
+        await assertMercadoPagoLiquidityAccount(client, mercadoPagoAccountId);
+      }
+
+      // Solo cup_movements: el neto queda en el cierre de caja (no se duplica en
+      // finance_transactions; el cierre ya descuenta devoluciones por medio de pago).
       await client.query(
         `INSERT INTO cup_movements (
           id, cash_register_id, type, quantity, amount,
@@ -197,38 +202,6 @@ router.post('/return', async (req, res) => {
           paymentMethod === 'cuenta_abierta' ? openAccountId : null,
         ],
       );
-
-      if (paymentMethod === 'efectivo') {
-        const txId = crypto.randomUUID();
-        await client.query(
-          `INSERT INTO finance_transactions
-           (id, account_id, type, amount, description, source, category, reference_id, date)
-           VALUES ($1, 'efectivo', 'expense', $2, $3, 'buffet', 'devolucion-vasos', $4, $5)`,
-          [
-            txId,
-            amount,
-            `Devolución depósito vasos (${quantity} u.)`,
-            `cup-return:${movementId}`,
-            now,
-          ],
-        );
-      } else if (paymentMethod === 'mercadopago') {
-        await assertMercadoPagoLiquidityAccount(client, mercadoPagoAccountId);
-        const txId = crypto.randomUUID();
-        await client.query(
-          `INSERT INTO finance_transactions
-           (id, account_id, type, amount, description, source, category, reference_id, date)
-           VALUES ($1, $2, 'expense', $3, $4, 'buffet', 'devolucion-vasos', $5, $6)`,
-          [
-            txId,
-            mercadoPagoAccountId,
-            amount,
-            `Devolución depósito vasos (${quantity} u.)`,
-            `cup-return:${movementId}`,
-            now,
-          ],
-        );
-      }
 
       await client.query('COMMIT');
     } catch (e) {
