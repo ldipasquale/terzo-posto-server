@@ -123,6 +123,54 @@ router.post('/transactions', async (req, res) => {
   }
 });
 
+router.put('/transactions/:id', async (req, res) => {
+  try {
+    const t = req.body;
+    if (!t?.accountId || !t?.type || Number(t.amount) <= 0 || !t?.description) {
+      return res.status(400).json({ error: 'Datos inválidos de movimiento' });
+    }
+
+    const accountId = normalizeAccountId(t.accountId);
+    await assertLiquidityAccountExists(accountId);
+
+    const result = await db.query(
+      `UPDATE finance_transactions
+       SET account_id = $1,
+           type = $2,
+           amount = $3,
+           description = $4,
+           category = $5,
+           date = $6
+       WHERE id = $7
+         AND source = 'manual'`,
+      [
+        accountId,
+        t.type,
+        Number(t.amount),
+        String(t.description).trim(),
+        t.category ?? null,
+        t.date || new Date().toISOString(),
+        req.params.id,
+      ],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Movimiento no encontrado o no editable' });
+    }
+
+    const updated = await db.query('SELECT * FROM finance_transactions WHERE id = $1', [
+      req.params.id,
+    ]);
+    res.json(mapTransaction(updated.rows[0]));
+  } catch (error) {
+    console.error('Error updating finance transaction:', error);
+    if (error.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
+    res.status(500).json({ error: 'Error al actualizar movimiento' });
+  }
+});
+
 router.delete('/transactions/:id', async (req, res) => {
   try {
     const result = await db.query(
