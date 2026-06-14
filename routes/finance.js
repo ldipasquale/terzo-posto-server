@@ -87,14 +87,53 @@ async function assertLiquidityAccountExists(accountId) {
   }
 }
 
+function validateTransactionPayload(t) {
+  if (!t?.accountId || !t?.type || Number(t.amount) <= 0 || !t?.description) {
+    const err = new Error('Datos inválidos de movimiento');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!['income', 'expense', 'transfer'].includes(t.type)) {
+    const err = new Error('Tipo de movimiento inválido');
+    err.statusCode = 400;
+    throw err;
+  }
+  const accountId = normalizeAccountId(t.accountId);
+  if (t.type === 'transfer') {
+    const destId = normalizeAccountId(t.referenceId);
+    if (!destId) {
+      const err = new Error('Destino de transferencia requerido');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (destId === accountId) {
+      const err = new Error('El destino debe ser distinto de la cuenta origen');
+      err.statusCode = 400;
+      throw err;
+    }
+    return { accountId, destId, category: null, referenceId: destId };
+  }
+  return {
+    accountId,
+    destId: null,
+    category: t.category ?? null,
+    referenceId: t.referenceId ?? null,
+  };
+}
+
 router.post('/transactions', async (req, res) => {
   try {
     const t = req.body;
-    if (!t?.accountId || !t?.type || Number(t.amount) <= 0 || !t?.description) {
-      return res.status(400).json({ error: 'Datos inválidos de movimiento' });
+    let parsed;
+    try {
+      parsed = validateTransactionPayload(t);
+    } catch (e) {
+      if (e.statusCode === 400) return res.status(400).json({ error: e.message });
+      throw e;
     }
-    const accountId = normalizeAccountId(t.accountId);
+    const { accountId, destId, category, referenceId } = parsed;
     await assertLiquidityAccountExists(accountId);
+    if (destId) await assertLiquidityAccountExists(destId);
     const id = crypto.randomUUID();
     await db.query(
       `INSERT INTO finance_transactions
@@ -107,8 +146,8 @@ router.post('/transactions', async (req, res) => {
         Number(t.amount),
         String(t.description).trim(),
         t.source || 'manual',
-        t.category ?? null,
-        t.referenceId ?? null,
+        category,
+        referenceId,
         t.date || new Date().toISOString(),
       ],
     );
@@ -126,12 +165,16 @@ router.post('/transactions', async (req, res) => {
 router.put('/transactions/:id', async (req, res) => {
   try {
     const t = req.body;
-    if (!t?.accountId || !t?.type || Number(t.amount) <= 0 || !t?.description) {
-      return res.status(400).json({ error: 'Datos inválidos de movimiento' });
+    let parsed;
+    try {
+      parsed = validateTransactionPayload(t);
+    } catch (e) {
+      if (e.statusCode === 400) return res.status(400).json({ error: e.message });
+      throw e;
     }
-
-    const accountId = normalizeAccountId(t.accountId);
+    const { accountId, destId, category, referenceId } = parsed;
     await assertLiquidityAccountExists(accountId);
+    if (destId) await assertLiquidityAccountExists(destId);
 
     const result = await db.query(
       `UPDATE finance_transactions
@@ -140,15 +183,17 @@ router.put('/transactions/:id', async (req, res) => {
            amount = $3,
            description = $4,
            category = $5,
-           date = $6
-       WHERE id = $7
+           reference_id = $6,
+           date = $7
+       WHERE id = $8
          AND source = 'manual'`,
       [
         accountId,
         t.type,
         Number(t.amount),
         String(t.description).trim(),
-        t.category ?? null,
+        category,
+        referenceId,
         t.date || new Date().toISOString(),
         req.params.id,
       ],

@@ -54,6 +54,10 @@ const mapRental = (row) => ({
     row.revenue_share_percent != null
       ? Number(row.revenue_share_percent)
       : undefined,
+  roomInsurancePrice:
+    row.room_insurance_price != null
+      ? Number(row.room_insurance_price)
+      : undefined,
   dateSlots: row.date_slots || undefined,
   createdAt: new Date(row.created_at).toISOString(),
 });
@@ -213,12 +217,12 @@ router.post('/rentals', async (req, res) => {
       `INSERT INTO agenda_rentals (
         id, type, person_name, person_phone, activity_name, room_id, notes, finalized,
         schedules, price_per_hour, start_month, end_month, event_type, date, start_time, end_time,
-        fixed_price, consumption_credit, has_tickets, ticket_price, revenue_share_percent, date_slots
+        fixed_price, consumption_credit, has_tickets, ticket_price, revenue_share_percent, room_insurance_price, date_slots
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22
+        $17, $18, $19, $20, $21, $22, $23
       )`,
       [
         id,
@@ -242,6 +246,7 @@ router.post('/rentals', async (req, res) => {
         r.hasTickets == null ? null : r.hasTickets ? 1 : 0,
         r.ticketPrice ?? null,
         r.revenueSharePercent ?? null,
+        r.roomInsurancePrice ?? null,
         r.dateSlots ? JSON.stringify(r.dateSlots) : null,
       ],
     );
@@ -291,9 +296,10 @@ router.put('/rentals/:id', async (req, res) => {
         has_tickets = COALESCE($18, has_tickets),
         ticket_price = COALESCE($19, ticket_price),
         revenue_share_percent = COALESCE($20, revenue_share_percent),
-        date_slots = COALESCE($21, date_slots),
+        room_insurance_price = COALESCE($21, room_insurance_price),
+        date_slots = COALESCE($22, date_slots),
         updated_at = CURRENT_TIMESTAMP
-      WHERE id = $22`,
+      WHERE id = $23`,
       [
         r.type ?? null,
         r.personName ?? null,
@@ -315,6 +321,7 @@ router.put('/rentals/:id', async (req, res) => {
         r.hasTickets == null ? null : r.hasTickets ? 1 : 0,
         r.ticketPrice ?? null,
         r.revenueSharePercent ?? null,
+        r.roomInsurancePrice ?? null,
         r.dateSlots ? JSON.stringify(r.dateSlots) : null,
         id,
       ],

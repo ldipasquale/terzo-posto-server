@@ -190,6 +190,7 @@ const CREATE_TABLES = `
     has_tickets SMALLINT,
     ticket_price DOUBLE PRECISION,
     revenue_share_percent DOUBLE PRECISION,
+    room_insurance_price DOUBLE PRECISION,
     date_slots JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -211,7 +212,7 @@ const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS finance_transactions (
     id TEXT PRIMARY KEY,
     account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
-    type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
+    type TEXT NOT NULL CHECK (type IN ('income', 'expense', 'transfer')),
     amount DOUBLE PRECISION NOT NULL,
     description TEXT NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense')),
@@ -713,7 +714,18 @@ async function initDb() {
     }
 
     await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_agenda_rentals_date ON agenda_rentals(date);
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS room_insurance_price DOUBLE PRECISION;
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_transactions DROP CONSTRAINT IF EXISTS finance_transactions_type_check;
+    `);
+    await client.query(`
+      ALTER TABLE finance_transactions ADD CONSTRAINT finance_transactions_type_check
+      CHECK (type IN ('income', 'expense', 'transfer'));
+    `);
+
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_agenda_rentals_type ON agenda_rentals(type);
       CREATE INDEX IF NOT EXISTS idx_agenda_payments_rental_id ON agenda_payments(rental_id);
       CREATE INDEX IF NOT EXISTS idx_agenda_payments_paid_date ON agenda_payments(paid_date);

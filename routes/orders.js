@@ -489,6 +489,15 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(400).json({ error: 'Estado inválido' });
     }
 
+    const prevResult = await db.query(
+      `SELECT status FROM orders WHERE id = $1`,
+      [id],
+    );
+    if (prevResult.rowCount === 0) {
+      return res.status(404).json({ error: 'Pedido no encontrado' });
+    }
+    const previousStatus = prevResult.rows[0].status;
+
     const result = await db.query(
       `UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
       [status, id],
@@ -503,6 +512,14 @@ router.patch('/:id/status', async (req, res) => {
         `UPDATE order_items
          SET is_delivered = TRUE,
              delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+         WHERE order_id = $1`,
+        [id],
+      );
+    } else if (status === 'pending' && previousStatus === 'delivered') {
+      await db.query(
+        `UPDATE order_items
+         SET is_delivered = FALSE,
+             delivered_at = NULL
          WHERE order_id = $1`,
         [id],
       );
