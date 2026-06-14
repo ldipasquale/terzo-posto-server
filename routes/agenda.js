@@ -274,6 +274,12 @@ router.put('/rentals/:id', async (req, res) => {
     if (roomId === 'full-venue') {
       await ensureFullVenueRoom(db);
     }
+    const hasNotes = Object.prototype.hasOwnProperty.call(r, 'notes');
+    const notesValue = hasNotes
+      ? r.notes == null || String(r.notes).trim() === ''
+        ? null
+        : String(r.notes).trim()
+      : null;
     const result = await db.query(
       `UPDATE agenda_rentals SET
         type = COALESCE($1, type),
@@ -281,7 +287,7 @@ router.put('/rentals/:id', async (req, res) => {
         person_phone = COALESCE($3, person_phone),
         activity_name = COALESCE($4, activity_name),
         room_id = COALESCE($5, room_id),
-        notes = COALESCE($6, notes),
+        notes = CASE WHEN $24::boolean THEN $6 ELSE notes END,
         finalized = COALESCE($7, finalized),
         schedules = COALESCE($8, schedules),
         price_per_hour = COALESCE($9, price_per_hour),
@@ -306,7 +312,7 @@ router.put('/rentals/:id', async (req, res) => {
         personPhoneValue,
         r.activityName ?? null,
         roomId ?? null,
-        r.notes ?? null,
+        notesValue,
         r.finalized == null ? null : r.finalized ? 1 : 0,
         r.schedules ? JSON.stringify(r.schedules) : null,
         r.pricePerHour ?? null,
@@ -324,6 +330,7 @@ router.put('/rentals/:id', async (req, res) => {
         r.roomInsurancePrice ?? null,
         r.dateSlots ? JSON.stringify(r.dateSlots) : null,
         id,
+        hasNotes,
       ],
     );
     if (result.rowCount === 0)
