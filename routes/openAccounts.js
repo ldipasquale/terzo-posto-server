@@ -1,6 +1,7 @@
 import express from 'express';
 import db from '../database.js';
 import { randomUUID } from 'crypto';
+import { snapshotCostsForOrder } from '../lib/orderItemCosts.js';
 
 const router = express.Router();
 
@@ -129,6 +130,14 @@ router.post('/:id/close', async (req, res) => {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+
+      const ordersForCost = await client.query(
+        `SELECT id FROM orders WHERE open_account_id = $1`,
+        [id],
+      );
+      for (const row of ordersForCost.rows) {
+        await snapshotCostsForOrder(client, row.id);
+      }
 
       // If there's a discount, apply it to orders from last to first until fully applied
       const hasDiscount = discount != null && Number(discount) > 0;

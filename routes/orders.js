@@ -25,7 +25,13 @@ const orderSelectWithItems = `
       'notes', oi.notes,
       'isDelivered', oi.is_delivered,
       'createdAt', oi.created_at,
-      'deliveredAt', oi.delivered_at
+      'deliveredAt', oi.delivered_at,
+      'promotionId', oi.promotion_id,
+      'promotionGroupId', oi.promotion_group_id,
+      'promotionName', oi.promotion_name,
+      'promotionPrice', oi.promotion_price,
+      'promotionUnitPrice', oi.promotion_unit_price,
+      'promotionGroupCost', oi.promotion_group_cost
     )), '[]'::json)
     FROM order_items oi WHERE oi.order_id = o.id) AS items_json
   FROM orders o
@@ -65,6 +71,21 @@ function formatOrder(order) {
         deliveredAt: item.deliveredAt
           ? new Date(item.deliveredAt).toISOString()
           : undefined,
+        promotionId: item.promotionId || undefined,
+        promotionGroupId: item.promotionGroupId || undefined,
+        promotionName: item.promotionName || undefined,
+        promotionPrice:
+          item.promotionPrice != null && item.promotionPrice !== ''
+            ? Number(item.promotionPrice)
+            : undefined,
+        promotionUnitPrice:
+          item.promotionUnitPrice != null && item.promotionUnitPrice !== ''
+            ? Number(item.promotionUnitPrice)
+            : undefined,
+        promotionGroupCost:
+          item.promotionGroupCost != null && item.promotionGroupCost !== ''
+            ? Number(item.promotionGroupCost)
+            : undefined,
       };
     }),
     total: Number(order.total),
@@ -87,6 +108,38 @@ function formatOrder(order) {
         ? Number(order.cups_delivered)
         : 0,
   };
+}
+
+function computeOrderItemsSubtotal(items) {
+  const countedPromoGroups = new Set();
+  let sum = 0;
+  for (const item of items) {
+    if (!item?.menuItem?.id || item.quantity == null) continue;
+    const qty = Math.floor(Number(item.quantity));
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+
+    const groupId = item.promotionGroupId;
+    if (groupId) {
+      if (countedPromoGroups.has(groupId)) continue;
+      countedPromoGroups.add(groupId);
+      const promoPrice =
+        item.promotionPrice != null && item.promotionPrice !== ''
+          ? Number(item.promotionPrice)
+          : null;
+      if (promoPrice != null && Number.isFinite(promoPrice)) {
+        sum += promoPrice;
+        continue;
+      }
+    }
+
+    const unitPrice =
+      item.promotionUnitPrice != null && item.promotionUnitPrice !== ''
+        ? Number(item.promotionUnitPrice)
+        : Number(item.menuItem.price);
+    if (!Number.isFinite(unitPrice)) continue;
+    sum += unitPrice * qty;
+  }
+  return sum;
 }
 
 /**
@@ -312,7 +365,6 @@ router.post('/', async (req, res) => {
     }
 
     const cupPrice = await getCupPrice();
-    let itemsSubtotal = 0;
     for (const item of items) {
       if (!item?.menuItem?.id || item.quantity == null) {
         return res.status(400).json({ error: 'Ítem de pedido inválido' });
@@ -321,12 +373,8 @@ router.post('/', async (req, res) => {
       if (!Number.isFinite(qty) || qty <= 0) {
         return res.status(400).json({ error: 'Cantidad de ítem inválida' });
       }
-      const price = Number(item.menuItem.price);
-      if (!Number.isFinite(price)) {
-        return res.status(400).json({ error: 'Precio de ítem inválido' });
-      }
-      itemsSubtotal += price * qty;
     }
+    const itemsSubtotal = computeOrderItemsSubtotal(items);
 
     const cupsAmount = cupPrice * cupsDelivered;
     const discountNum =
@@ -355,7 +403,26 @@ router.post('/', async (req, res) => {
     }
 
     const menuIds = items.map((item) => item.menuItem?.id).filter(Boolean);
-    const unitCostMap = await getUnitCostsForMenuItemIds(menuIds);
+    /** Efectivo/MP: costo al crear (= cobro). Cuenta abierta: al cerrar la cuenta. */
+    const deferCostSnapshot = effectivePaymentMethod === 'cuenta_abierta';
+    const unitCostMap = deferCostSnapshot
+      ? new Map()
+      : await getUnitCostsForMenuItemIds(menuIds);
+
+    /** Costo total del combo al momento del cobro, por promotionGroupId */
+    const promotionGroupCostMap = new Map();
+    if (!deferCostSnapshot) {
+      for (const item of items) {
+        if (!item.promotionGroupId) continue;
+        const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
+        const unitCost = unitCostMap.get(item.menuItem.id) ?? 0;
+        const prev = promotionGroupCostMap.get(item.promotionGroupId) ?? 0;
+        promotionGroupCostMap.set(
+          item.promotionGroupId,
+          prev + unitCost * qty,
+        );
+      }
+    }
 
     const client = await db.connect();
     let orderId;
@@ -408,7 +475,9 @@ router.post('/', async (req, res) => {
       );
 
       for (const item of items) {
-        const unitCost = unitCostMap.get(item.menuItem.id) ?? null;
+        const unitCost = deferCostSnapshot
+          ? null
+          : (unitCostMap.get(item.menuItem.id) ?? null);
         const qty = Math.max(1, Math.floor(Number(item.quantity) || 1));
         const type = item.menuItem.type;
 
@@ -421,11 +490,14 @@ router.post('/', async (req, res) => {
           await client.query(
             `INSERT INTO order_items (
                order_id, menu_item_id, name, description, price, category, type,
-               quantity, notes, unit_cost, is_delivered, created_at, delivered_at
+               quantity, notes, unit_cost, is_delivered, created_at, delivered_at,
+               promotion_id, promotion_group_id, promotion_name, promotion_price,
+               promotion_unit_price, promotion_group_cost
              )
              VALUES (
                $1, $2, $3, $4, $5, $6, $7,
-               $8, $9, $10, $11, CURRENT_TIMESTAMP, NULL
+               $8, $9, $10, $11, CURRENT_TIMESTAMP, NULL,
+               $12, $13, $14, $15, $16, $17
              )`,
             [
               orderId,
@@ -439,6 +511,18 @@ router.post('/', async (req, res) => {
               item.notes || null,
               unitCost,
               false,
+              item.promotionId || null,
+              item.promotionGroupId || null,
+              item.promotionName || null,
+              item.promotionPrice != null && item.promotionPrice !== ''
+                ? Number(item.promotionPrice)
+                : null,
+              item.promotionUnitPrice != null && item.promotionUnitPrice !== ''
+                ? Number(item.promotionUnitPrice)
+                : null,
+              item.promotionGroupId && !deferCostSnapshot
+                ? promotionGroupCostMap.get(item.promotionGroupId) ?? null
+                : null,
             ],
           );
         }
@@ -590,7 +674,13 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
            unit_cost,
            is_delivered,
            created_at,
-           delivered_at
+           delivered_at,
+           promotion_id,
+           promotion_group_id,
+           promotion_name,
+           promotion_price,
+           promotion_unit_price,
+           promotion_group_cost
          FROM order_items
          WHERE id = $1 AND order_id = $2
          FOR UPDATE`,
@@ -629,9 +719,16 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
                unit_cost,
                is_delivered,
                created_at,
-               delivered_at
+               delivered_at,
+               promotion_id,
+               promotion_group_id,
+               promotion_name,
+               promotion_price,
+               promotion_unit_price,
+               promotion_group_cost
              ) VALUES (
-               $1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10, $11, $12
+               $1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10, $11, $12,
+               $13, $14, $15, $16, $17, $18
              )`,
             [
               item.order_id,
@@ -646,6 +743,12 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
               isDelivered,
               item.created_at,
               isDelivered ? new Date().toISOString() : null,
+              item.promotion_id ?? null,
+              item.promotion_group_id ?? null,
+              item.promotion_name ?? null,
+              item.promotion_price ?? null,
+              item.promotion_unit_price ?? null,
+              item.promotion_group_cost ?? null,
             ],
           );
         }
@@ -665,7 +768,9 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
       const countsResult = await client.query(
         `SELECT
            COALESCE(SUM(quantity), 0)::int AS total_items,
-           COALESCE(SUM(CASE WHEN is_delivered THEN quantity ELSE 0 END), 0)::int AS delivered_items
+           COALESCE(SUM(CASE WHEN is_delivered THEN quantity ELSE 0 END), 0)::int AS delivered_items,
+           COALESCE(SUM(CASE WHEN type = 'comida' THEN quantity ELSE 0 END), 0)::int AS total_food,
+           COALESCE(SUM(CASE WHEN type = 'comida' AND is_delivered THEN quantity ELSE 0 END), 0)::int AS delivered_food
          FROM order_items
          WHERE order_id = $1`,
         [id],
@@ -674,12 +779,16 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
       const totals = countsResult.rows[0];
       const allDelivered =
         totals.total_items > 0 && totals.delivered_items === totals.total_items;
+      const allFoodDelivered =
+        totals.total_food > 0 && totals.delivered_food === totals.total_food;
+      const shouldBeReady =
+        totals.total_food > 0 ? allFoodDelivered : allDelivered;
 
-      if (allDelivered) {
+      if (shouldBeReady) {
         await client.query(
           `UPDATE orders
-           SET status = 'delivered', updated_at = CURRENT_TIMESTAMP
-           WHERE id = $1`,
+           SET status = 'ready', updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1 AND status = 'pending'`,
           [id],
         );
       } else {
@@ -687,7 +796,7 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
         await client.query(
           `UPDATE orders
            SET status = 'pending', updated_at = CURRENT_TIMESTAMP
-           WHERE id = $1 AND status = 'delivered'`,
+           WHERE id = $1 AND status IN ('ready', 'delivered')`,
           [id],
         );
       }

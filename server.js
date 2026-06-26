@@ -12,6 +12,7 @@ import agendaRoutes from './routes/agenda.js';
 import financeRoutes from './routes/finance.js';
 import purchasesRoutes from './routes/purchases.js';
 import cupsRoutes from './routes/cups.js';
+import promotionsRoutes from './routes/promotions.js';
 import { authenticateToken } from './middleware/auth.js';
 
 const app = express();
@@ -40,6 +41,7 @@ app.use('/api/agenda', authenticateToken, agendaRoutes);
 app.use('/api/finance', authenticateToken, financeRoutes);
 app.use('/api/purchases', authenticateToken, purchasesRoutes);
 app.use('/api/cups', authenticateToken, cupsRoutes);
+app.use('/api/promotions', authenticateToken, promotionsRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {

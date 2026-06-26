@@ -242,6 +242,39 @@ const CREATE_TABLES = `
     paid_date TIMESTAMP NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS promotions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    price DOUBLE PRECISION NOT NULL,
+    active SMALLINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS promotion_items (
+    id SERIAL PRIMARY KEY,
+    promotion_id TEXT NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+    menu_item_id TEXT NOT NULL REFERENCES menu_items(id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    UNIQUE (promotion_id, menu_item_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS discount_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    percent DOUBLE PRECISION NOT NULL CHECK (percent > 0 AND percent <= 100),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS discount_preset_menu_items (
+    id SERIAL PRIMARY KEY,
+    discount_preset_id TEXT NOT NULL REFERENCES discount_presets(id) ON DELETE CASCADE,
+    menu_item_id TEXT NOT NULL REFERENCES menu_items(id),
+    UNIQUE (discount_preset_id, menu_item_id)
+  );
 `;
 
 async function initDb() {
@@ -318,6 +351,21 @@ async function initDb() {
       await client.query(
         'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMP',
       );
+    }
+    const promoOiCols = [
+      ['promotion_id', 'TEXT'],
+      ['promotion_group_id', 'TEXT'],
+      ['promotion_name', 'TEXT'],
+      ['promotion_price', 'DOUBLE PRECISION'],
+      ['promotion_unit_price', 'DOUBLE PRECISION'],
+      ['promotion_group_cost', 'DOUBLE PRECISION'],
+    ];
+    for (const [col, def] of promoOiCols) {
+      if (!oiColNames.includes(col)) {
+        await client.query(
+          `ALTER TABLE order_items ADD COLUMN IF NOT EXISTS ${col} ${def}`,
+        );
+      }
     }
     await client.query(`
       UPDATE order_items oi
@@ -737,6 +785,11 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_cash_registers_created_at ON cash_registers(created_at);
       CREATE INDEX IF NOT EXISTS idx_buffet_purchases_date ON buffet_purchases(date);
       CREATE INDEX IF NOT EXISTS idx_buffet_purchase_items_purchase_id ON buffet_purchase_items(purchase_id);
+      CREATE INDEX IF NOT EXISTS idx_promotion_items_promotion_id ON promotion_items(promotion_id);
+      CREATE INDEX IF NOT EXISTS idx_promotion_items_menu_item_id ON promotion_items(menu_item_id);
+      CREATE INDEX IF NOT EXISTS idx_discount_preset_menu_items_preset_id ON discount_preset_menu_items(discount_preset_id);
+      CREATE INDEX IF NOT EXISTS idx_discount_preset_menu_items_menu_item_id ON discount_preset_menu_items(menu_item_id);
+      CREATE INDEX IF NOT EXISTS idx_order_items_promotion_group_id ON order_items(promotion_group_id);
     `);
 
     await client.query(`
