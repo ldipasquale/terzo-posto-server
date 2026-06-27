@@ -455,6 +455,17 @@ async function initDb() {
         'ALTER TABLE app_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
       );
     }
+    if (!appUsersColNames.includes('is_admin')) {
+      await client.query(
+        'ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_admin SMALLINT NOT NULL DEFAULT 0',
+      );
+      await client.query('UPDATE app_users SET is_admin = 1');
+    }
+    if (!appUsersColNames.includes('permissions')) {
+      await client.query(
+        "ALTER TABLE app_users ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '[]'::jsonb",
+      );
+    }
 
     const findMpAccountByHolder = async (holderCandidates) => {
       for (const holder of holderCandidates) {
@@ -510,8 +521,8 @@ async function initDb() {
         const passwordHash = await bcrypt.hash(fixedUser.password, 10);
         await client.query(
           `INSERT INTO app_users
-             (id, name, email, password_hash, default_mercado_pago_account_id, active, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+             (id, name, email, password_hash, default_mercado_pago_account_id, active, is_admin, permissions, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, 1, 1, '[]'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
           [
             fixedUser.id,
             fixedUser.name,
@@ -538,6 +549,8 @@ async function initDb() {
              password_hash = $3,
              default_mercado_pago_account_id = $4,
              active = 1,
+             is_admin = 1,
+             permissions = '[]'::jsonb,
              updated_at = CURRENT_TIMESTAMP
          WHERE email = $5`,
         [

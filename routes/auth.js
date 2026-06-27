@@ -2,6 +2,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import db from '../database.js';
+import { parsePermissionsJson } from '../lib/userPermissions.js';
 
 const router = express.Router();
 
@@ -16,7 +17,8 @@ router.post('/login', async (req, res) => {
 
   try {
     const result = await db.query(
-      `SELECT id, name, email, password_hash, default_mercado_pago_account_id, active
+      `SELECT id, name, email, password_hash, default_mercado_pago_account_id,
+              active, is_admin, permissions
        FROM app_users
        WHERE LOWER(email) = LOWER($1)
        LIMIT 1`,
@@ -41,6 +43,8 @@ router.post('/login', async (req, res) => {
       email: user.email,
       name: user.name,
       defaultMercadoPagoAccountId: user.default_mercado_pago_account_id || undefined,
+      isAdmin: Boolean(user.is_admin),
+      permissions: parsePermissionsJson(user.permissions),
     };
 
     const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '7d' });

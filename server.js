@@ -13,7 +13,12 @@ import financeRoutes from './routes/finance.js';
 import purchasesRoutes from './routes/purchases.js';
 import cupsRoutes from './routes/cups.js';
 import promotionsRoutes from './routes/promotions.js';
+import usersRoutes from './routes/users.js';
 import { authenticateToken } from './middleware/auth.js';
+import {
+  requireAnyPermission,
+} from './middleware/requirePermission.js';
+import { PERMISSIONS } from './lib/userPermissions.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -31,17 +36,68 @@ app.get('/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 
 // Protected routes
-app.use('/api/orders', authenticateToken, ordersRoutes);
-app.use('/api/menu', authenticateToken, menuRoutes);
+app.use('/api/users', authenticateToken, usersRoutes);
+app.use(
+  '/api/orders',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.COMANDAS),
+  ordersRoutes,
+);
+app.use(
+  '/api/menu',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.COMANDAS, PERMISSIONS.BUFFET_GESTION),
+  menuRoutes,
+);
 app.use('/api/settings', authenticateToken, settingsRoutes);
-app.use('/api/cash-registers', authenticateToken, cashRegistersRoutes);
-app.use('/api/supplies', authenticateToken, suppliesRoutes);
-app.use('/api/open-accounts', authenticateToken, openAccountsRoutes);
-app.use('/api/agenda', authenticateToken, agendaRoutes);
-app.use('/api/finance', authenticateToken, financeRoutes);
-app.use('/api/purchases', authenticateToken, purchasesRoutes);
-app.use('/api/cups', authenticateToken, cupsRoutes);
-app.use('/api/promotions', authenticateToken, promotionsRoutes);
+app.use(
+  '/api/cash-registers',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.COMANDAS),
+  cashRegistersRoutes,
+);
+app.use(
+  '/api/supplies',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.BUFFET_GESTION),
+  suppliesRoutes,
+);
+app.use(
+  '/api/open-accounts',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.COMANDAS),
+  openAccountsRoutes,
+);
+app.use(
+  '/api/agenda',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.AGENDA),
+  agendaRoutes,
+);
+app.use(
+  '/api/finance',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.FINANZAS),
+  financeRoutes,
+);
+app.use(
+  '/api/purchases',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.BUFFET_GESTION),
+  purchasesRoutes,
+);
+app.use(
+  '/api/cups',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.COMANDAS),
+  cupsRoutes,
+);
+app.use(
+  '/api/promotions',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.COMANDAS, PERMISSIONS.BUFFET_GESTION),
+  promotionsRoutes,
+);
 
 // Error handling
 app.use((err, req, res, next) => {
