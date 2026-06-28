@@ -111,7 +111,8 @@ function validateDiscountPresetBody(body, { partial = false } = {}) {
     if (normalized?.error) {
       return { error: normalized.error };
     }
-    normalizedMenuItemIds = normalized.menuItemIds;
+    normalizedMenuItemIds =
+      normalized === undefined ? (partial ? undefined : []) : normalized.menuItemIds;
   }
 
   return {
