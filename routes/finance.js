@@ -1,6 +1,11 @@
 import crypto from 'crypto';
 import express from 'express';
 import db from '../database.js';
+import {
+  FINANCE_AREA_CATEGORY,
+  canLinkEventToArea,
+  isValidAreaCategory,
+} from '../lib/financeAreas.js';
 
 const router = express.Router();
 
@@ -8,7 +13,7 @@ function mapLiquidityAccount(row) {
   const isCash = row.kind === 'cash' || row.id === 'efectivo';
   return {
     id: row.id,
-    name: isCash ? 'Efectivo' : `${row.holder} (${row.alias})`,
+    name: isCash ? 'Efectivo' : row.holder,
     type: isCash ? 'cash' : 'partner',
     mercadoPagoAccountId: isCash ? undefined : row.id,
   };
@@ -21,7 +26,9 @@ const mapTransaction = (row) => ({
   amount: Number(row.amount),
   description: row.description,
   source: row.source,
+  area: row.area || undefined,
   category: row.category || undefined,
+  eventId: row.event_id || undefined,
   referenceId: row.reference_id || undefined,
   date: new Date(row.date).toISOString(),
   createdAt: new Date(row.created_at).toISOString(),
@@ -87,6 +94,31 @@ async function assertLiquidityAccountExists(accountId) {
   }
 }
 
+/**
+ * Valida event_id: solo eventos one-off y áreas linkeables.
+ * @returns {Promise<string|null>}
+ */
+async function resolveEventId(eventId, area) {
+  if (eventId == null || eventId === '') return null;
+  if (!canLinkEventToArea(area)) {
+    const err = new Error(
+      'Solo Cocina, Bar, Agenda y Comunicación pueden vincularse a un evento',
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+  const r = await db.query(
+    `SELECT id FROM agenda_rentals WHERE id = $1 AND type = 'one-off'`,
+    [eventId],
+  );
+  if (!r.rows[0]) {
+    const err = new Error('Evento no encontrado');
+    err.statusCode = 400;
+    throw err;
+  }
+  return eventId;
+}
+
 function validateTransactionPayload(t) {
   if (!t?.accountId || !t?.type || Number(t.amount) <= 0 || !t?.description) {
     const err = new Error('Datos inválidos de movimiento');
@@ -111,13 +143,33 @@ function validateTransactionPayload(t) {
       err.statusCode = 400;
       throw err;
     }
-    return { accountId, destId, category: null, referenceId: destId };
+    return {
+      accountId,
+      destId,
+      area: null,
+      category: null,
+      referenceId: destId,
+      eventIdRaw: null,
+    };
+  }
+  const area = t.area ?? null;
+  const category = t.category ?? null;
+  if ((t.source || 'manual') === 'manual') {
+    if (!isValidAreaCategory(t.type, area, category)) {
+      const err = new Error(
+        'Área/categoría inválida para el tipo de movimiento',
+      );
+      err.statusCode = 400;
+      throw err;
+    }
   }
   return {
     accountId,
     destId: null,
-    category: t.category ?? null,
+    area,
+    category,
     referenceId: t.referenceId ?? null,
+    eventIdRaw: t.eventId ?? null,
   };
 }
 
@@ -131,14 +183,15 @@ router.post('/transactions', async (req, res) => {
       if (e.statusCode === 400) return res.status(400).json({ error: e.message });
       throw e;
     }
-    const { accountId, destId, category, referenceId } = parsed;
+    const { accountId, destId, area, category, referenceId, eventIdRaw } = parsed;
     await assertLiquidityAccountExists(accountId);
     if (destId) await assertLiquidityAccountExists(destId);
+    const eventId = await resolveEventId(eventIdRaw, area);
     const id = crypto.randomUUID();
     await db.query(
       `INSERT INTO finance_transactions
-       (id, account_id, type, amount, description, source, category, reference_id, date)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+       (id, account_id, type, amount, description, source, area, category, reference_id, event_id, date)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         id,
         accountId,
@@ -146,8 +199,10 @@ router.post('/transactions', async (req, res) => {
         Number(t.amount),
         String(t.description).trim(),
         t.source || 'manual',
+        area,
         category,
         referenceId,
+        eventId,
         t.date || new Date().toISOString(),
       ],
     );
@@ -172,9 +227,10 @@ router.put('/transactions/:id', async (req, res) => {
       if (e.statusCode === 400) return res.status(400).json({ error: e.message });
       throw e;
     }
-    const { accountId, destId, category, referenceId } = parsed;
+    const { accountId, destId, area, category, referenceId, eventIdRaw } = parsed;
     await assertLiquidityAccountExists(accountId);
     if (destId) await assertLiquidityAccountExists(destId);
+    const eventId = await resolveEventId(eventIdRaw, area);
 
     const result = await db.query(
       `UPDATE finance_transactions
@@ -182,18 +238,22 @@ router.put('/transactions/:id', async (req, res) => {
            type = $2,
            amount = $3,
            description = $4,
-           category = $5,
-           reference_id = $6,
-           date = $7
-       WHERE id = $8
+           area = $5,
+           category = $6,
+           reference_id = $7,
+           event_id = $8,
+           date = $9
+       WHERE id = $10
          AND source = 'manual'`,
       [
         accountId,
         t.type,
         Number(t.amount),
         String(t.description).trim(),
+        area,
         category,
         referenceId,
+        eventId,
         t.date || new Date().toISOString(),
         req.params.id,
       ],
@@ -213,6 +273,69 @@ router.put('/transactions/:id', async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     res.status(500).json({ error: 'Error al actualizar movimiento' });
+  }
+});
+
+/** Reasignar área/categoría de cualquier ingreso/egreso (manual o automático). */
+router.patch('/transactions/:id/classification', async (req, res) => {
+  try {
+    const existing = await db.query(
+      'SELECT id, type FROM finance_transactions WHERE id = $1',
+      [req.params.id],
+    );
+    const row = existing.rows[0];
+    if (!row) {
+      return res.status(404).json({ error: 'Movimiento no encontrado' });
+    }
+    if (row.type !== 'income' && row.type !== 'expense') {
+      return res.status(400).json({ error: 'Solo se puede reclasificar ingresos o egresos' });
+    }
+
+    const area =
+      req.body?.area === undefined || req.body?.area === '' || req.body?.area === null
+        ? null
+        : req.body.area;
+    const category =
+      req.body?.category === undefined ||
+      req.body?.category === '' ||
+      req.body?.category === null
+        ? null
+        : req.body.category;
+
+    if (area == null) {
+      if (category != null) {
+        return res.status(400).json({
+          error: 'Sin área no admite categoría',
+        });
+      }
+    } else if (!isValidAreaCategory(row.type, area, category)) {
+      return res.status(400).json({
+        error: 'Área/categoría inválida para el tipo de movimiento',
+      });
+    }
+
+    let eventId;
+    try {
+      eventId = await resolveEventId(req.body?.eventId ?? null, area);
+    } catch (e) {
+      if (e.statusCode === 400) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+
+    await db.query(
+      `UPDATE finance_transactions
+       SET area = $1, category = $2, event_id = $3
+       WHERE id = $4`,
+      [area, category, eventId, req.params.id],
+    );
+
+    const updated = await db.query('SELECT * FROM finance_transactions WHERE id = $1', [
+      req.params.id,
+    ]);
+    res.json(mapTransaction(updated.rows[0]));
+  } catch (error) {
+    console.error('Error updating transaction classification:', error);
+    res.status(500).json({ error: 'Error al reclasificar movimiento' });
   }
 });
 
@@ -350,9 +473,18 @@ router.post('/fixed-expense-payments', async (req, res) => {
     );
     await client.query(
       `INSERT INTO finance_transactions
-      (id, account_id, type, amount, description, source, category, reference_id, date)
-      VALUES ($1,$2,'expense',$3,$4,'fixed-expense','gasto-fijo',$5,$6)`,
-      [txId, accountId, Number(p.amount), `${expense.name} — ${p.month}`, id, paidDate],
+      (id, account_id, type, amount, description, source, area, category, reference_id, date)
+      VALUES ($1,$2,'expense',$3,$4,'fixed-expense',$5,$6,$7,$8)`,
+      [
+        txId,
+        accountId,
+        Number(p.amount),
+        `${expense.name} — ${p.month}`,
+        FINANCE_AREA_CATEGORY.fixedExpense.area,
+        FINANCE_AREA_CATEGORY.fixedExpense.category,
+        id,
+        paidDate,
+      ],
     );
     await client.query('COMMIT');
     const created = await db.query(
@@ -430,7 +562,8 @@ router.get('/events-profitability', async (req, res) => {
         COALESCE(pay.ticket_income, 0) AS ticket_income,
         cr.id AS cash_register_id,
         COALESCE(buff.buffet_income, 0) AS buffet_income,
-        COALESCE(buff.buffet_cost, 0) AS buffet_cost
+        COALESCE(buff.buffet_cost, 0) AS buffet_cost,
+        COALESCE(exp.linked_expenses, 0) AS linked_expenses
       FROM agenda_rentals r
       LEFT JOIN (
         SELECT rental_id,
@@ -467,6 +600,12 @@ router.get('/events-profitability', async (req, res) => {
           GROUP BY o.cash_register_id
         ) ob ON ob.cash_register_id = cr.id
       ) buff ON buff.cash_register_id = cr.id
+      LEFT JOIN (
+        SELECT event_id, SUM(amount) AS linked_expenses
+        FROM finance_transactions
+        WHERE type = 'expense' AND event_id IS NOT NULL
+        GROUP BY event_id
+      ) exp ON exp.event_id = r.id
       WHERE ${where.join(' AND ')}
       ORDER BY r.date DESC
       `,
@@ -481,17 +620,23 @@ router.get('/events-profitability', async (req, res) => {
     };
 
     res.json(
-      result.rows.map((row) => ({
-        id: row.id,
-        name: row.activity_name,
-        eventType: row.event_type,
-        date: toYmd(row.date),
-        rentalIncome: Number(row.rental_income),
-        buffetIncome: Number(row.buffet_income),
-        ticketIncome: Number(row.ticket_income),
-        buffetCost: Number(row.buffet_cost),
-        cashRegisterId: row.cash_register_id || undefined,
-      })),
+      result.rows.map((row) => {
+        const buffetCost = Number(row.buffet_cost);
+        const linkedExpenses = Number(row.linked_expenses);
+        return {
+          id: row.id,
+          name: row.activity_name,
+          eventType: row.event_type,
+          date: toYmd(row.date),
+          rentalIncome: Number(row.rental_income),
+          buffetIncome: Number(row.buffet_income),
+          ticketIncome: Number(row.ticket_income),
+          buffetCost,
+          linkedExpenses,
+          totalCost: buffetCost + linkedExpenses,
+          cashRegisterId: row.cash_register_id || undefined,
+        };
+      }),
     );
   } catch (error) {
     console.error('Error fetching event profitability:', error);

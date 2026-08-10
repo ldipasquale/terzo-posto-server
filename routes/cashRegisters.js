@@ -1,6 +1,12 @@
 import express from "express";
 import db from "../database.js";
 import crypto from "crypto";
+import { FINANCE_AREA_CATEGORY } from "../lib/financeAreas.js";
+import {
+  allocateCupsAcrossAmounts,
+  getBuffetCloseSplitForCashRegister,
+  splitAmountByFoodDrinkCups,
+} from "../lib/foodDrinkSplit.js";
 
 const router = express.Router();
 
@@ -53,53 +59,116 @@ async function getCupSummaryForCashRegister(client, cashRegisterId) {
 }
 
 /**
- * Una transacción de ingreso por cada medio de pago del cierre (monto = actual neto).
+ * Ingresos del cierre: por cada medio de pago, tres movimientos (comida/bebida/vasos).
+ * Vasos = neto fijo (fuera del %); el resto se reparte comida/bebida según comandas.
+ * reference_id: caja-close:<id>:efectivo|mp:<mpId>:comida|bebida|vasos
  */
-async function insertBuffetCloseTransactions(client, cashRegisterId, closingData, eventName) {
+async function insertBuffetCloseTransactions(
+  client,
+  cashRegisterId,
+  closingData,
+  eventName,
+  eventId = null,
+) {
   const payments = Array.isArray(closingData?.payments)
     ? closingData.payments
     : [];
   const labelPrefix = eventName ? `Cierre de caja — ${eventName}` : "Cierre de caja";
   const closedAt = new Date().toISOString();
+  const { food, drink, cups } = await getBuffetCloseSplitForCashRegister(
+    client,
+    cashRegisterId,
+  );
 
+  const insertPart = async ({
+    accountId,
+    amount,
+    description,
+    areaCat,
+    referenceId,
+  }) => {
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    await client.query(
+      `INSERT INTO finance_transactions
+      (id, account_id, type, amount, description, source, area, category, reference_id, event_id, date)
+      VALUES ($1, $2, 'income', $3, $4, 'buffet', $5, $6, $7, $8, $9)`,
+      [
+        crypto.randomUUID(),
+        accountId,
+        amount,
+        description,
+        areaCat.area,
+        areaCat.category,
+        referenceId,
+        eventId,
+        closedAt,
+      ],
+    );
+  };
+
+  /** @type {Array<{ amount: number, accountId: string, paymentRef: string, payLabel: string }>} */
+  const eligible = [];
   for (const p of payments) {
     const amount = Number(p.actual);
     if (!Number.isFinite(amount) || amount <= 0) continue;
 
     const method = p.method;
+    let accountId;
+    let paymentRef;
+    let payLabel;
+
     if (method === "efectivo") {
-      const txId = crypto.randomUUID();
-      const desc = `${labelPrefix} — ${p.label || "Efectivo"}`;
-      await client.query(
-        `INSERT INTO finance_transactions
-        (id, account_id, type, amount, description, source, category, reference_id, date)
-        VALUES ($1, 'efectivo', 'income', $2, $3, 'buffet', 'buffet', $4, $5)`,
-        [
-          txId,
-          amount,
-          desc,
-          `caja-close:${cashRegisterId}:efectivo`,
-          closedAt,
-        ]
-      );
+      accountId = "efectivo";
+      paymentRef = "efectivo";
+      payLabel = p.label || "Efectivo";
     } else if (method && typeof method === "string") {
       await assertMercadoPagoLiquidityAccount(client, method);
-      const txId = crypto.randomUUID();
-      const desc = `${labelPrefix} — ${p.label || "Mercado Pago"}`;
-      await client.query(
-        `INSERT INTO finance_transactions
-        (id, account_id, type, amount, description, source, category, reference_id, date)
-        VALUES ($1, $2, 'income', $3, $4, 'buffet', 'buffet', $5, $6)`,
-        [
-          txId,
-          method,
-          amount,
-          desc,
-          `caja-close:${cashRegisterId}:mp:${method}`,
-          closedAt,
-        ]
-      );
+      accountId = method;
+      paymentRef = `mp:${method}`;
+      payLabel = p.label || "Mercado Pago";
+    } else {
+      continue;
     }
+
+    eligible.push({ amount, accountId, paymentRef, payLabel });
+  }
+
+  const cupsShares = allocateCupsAcrossAmounts(
+    eligible.map((e) => e.amount),
+    cups,
+  );
+
+  for (let i = 0; i < eligible.length; i++) {
+    const { amount, accountId, paymentRef, payLabel } = eligible[i];
+    const { foodAmount, drinkAmount, cupsAmount } = splitAmountByFoodDrinkCups(
+      amount,
+      food,
+      drink,
+      cupsShares[i],
+    );
+    const baseRef = `caja-close:${cashRegisterId}:${paymentRef}`;
+
+    await insertPart({
+      accountId,
+      amount: foodAmount,
+      description: `${labelPrefix} — ${payLabel} (comida)`,
+      areaCat: FINANCE_AREA_CATEGORY.buffetFoodIncome,
+      referenceId: `${baseRef}:comida`,
+    });
+    await insertPart({
+      accountId,
+      amount: drinkAmount,
+      description: `${labelPrefix} — ${payLabel} (bebida)`,
+      areaCat: FINANCE_AREA_CATEGORY.buffetDrinkIncome,
+      referenceId: `${baseRef}:bebida`,
+    });
+    await insertPart({
+      accountId,
+      amount: cupsAmount,
+      description: `${labelPrefix} — ${payLabel} (vasos)`,
+      areaCat: FINANCE_AREA_CATEGORY.buffetCupsIncome,
+      referenceId: `${baseRef}:vasos`,
+    });
   }
 }
 
@@ -263,7 +332,7 @@ router.patch("/:id/close", async (req, res) => {
     }
 
     const check = await db.query(
-      "SELECT id, status, event_name FROM cash_registers WHERE id = $1",
+      "SELECT id, status, event_name, event_id FROM cash_registers WHERE id = $1",
       [id]
     );
     const caja = check.rows[0];
@@ -287,7 +356,8 @@ router.patch("/:id/close", async (req, res) => {
         client,
         id,
         mergedClosingData,
-        caja.event_name
+        caja.event_name,
+        caja.event_id || null,
       );
       await client.query(
         `UPDATE cash_registers SET status = 'closed', closed_at = $1, closing_data = $2 WHERE id = $3`,

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import express from 'express';
 import multer from 'multer';
 import db from '../database.js';
+import { FINANCE_AREA_CATEGORY } from '../lib/financeAreas.js';
 import { parsePurchaseTicketImage } from '../lib/parsePurchaseTicketImage.js';
 
 const router = express.Router();
@@ -222,19 +223,22 @@ router.post('/', async (req, res) => {
       provider
         ? `Compra: ${provider}${notes ? ` — ${notes}` : ''}`
         : `Compra de insumos${notes ? ` — ${notes}` : ''}`;
-    const financeCategory =
-      p.category === 'comida' ? 'insumos-comida' : 'insumos-bebida';
+    const financeAreaCat =
+      p.category === 'comida'
+        ? FINANCE_AREA_CATEGORY.purchaseFood
+        : FINANCE_AREA_CATEGORY.purchaseDrink;
     const txId = crypto.randomUUID();
     await client.query(
       `INSERT INTO finance_transactions
-      (id, account_id, type, amount, description, source, category, reference_id, date)
-      VALUES ($1, $2, 'expense', $3, $4, 'buffet', $5, $6, $7)`,
+      (id, account_id, type, amount, description, source, area, category, reference_id, date)
+      VALUES ($1, $2, 'expense', $3, $4, 'buffet', $5, $6, $7, $8)`,
       [
         txId,
         financeAccountId,
         total,
         desc,
-        financeCategory,
+        financeAreaCat.area,
+        financeAreaCat.category,
         id,
         date,
       ],

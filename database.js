@@ -217,8 +217,10 @@ const CREATE_TABLES = `
     amount DOUBLE PRECISION NOT NULL,
     description TEXT NOT NULL,
     source TEXT NOT NULL CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense')),
+    area TEXT,
     category TEXT,
     reference_id TEXT,
+    event_id TEXT REFERENCES agenda_rentals(id) ON DELETE SET NULL,
     date TIMESTAMP NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -790,6 +792,49 @@ async function initDb() {
     await client.query(`
       ALTER TABLE finance_transactions ADD CONSTRAINT finance_transactions_type_check
       CHECK (type IN ('income', 'expense', 'transfer'));
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_transactions ADD COLUMN IF NOT EXISTS area TEXT;
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_transactions ADD COLUMN IF NOT EXISTS event_id TEXT
+        REFERENCES agenda_rentals(id) ON DELETE SET NULL;
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_finance_transactions_event_id
+      ON finance_transactions(event_id);
+    `);
+
+    // Split legacy encoded values `area/categoria` into columns (once).
+    await client.query(`
+      UPDATE finance_transactions
+      SET
+        area = split_part(category, '/', 1),
+        category = NULLIF(substring(category from position('/' in category) + 1), '')
+      WHERE area IS NULL
+        AND category IS NOT NULL
+        AND position('/' in category) > 0
+        AND split_part(category, '/', 1) IN (
+          'cocina', 'bar', 'agenda-eventos', 'comunicacion-marketing',
+          'talleres', 'administracion', 'obra', 'mantenimiento'
+        )
+    `);
+
+    // Area-only encoded values (no slash), e.g. "talleres" or "obra"
+    await client.query(`
+      UPDATE finance_transactions
+      SET area = category, category = NULL
+      WHERE area IS NULL
+        AND category IN (
+          'cocina', 'bar', 'agenda-eventos', 'comunicacion-marketing',
+          'talleres', 'administracion', 'obra', 'mantenimiento'
+        )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_finance_transactions_area ON finance_transactions(area);
     `);
 
     await client.query(`

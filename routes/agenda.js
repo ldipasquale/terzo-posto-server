@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import express from 'express';
 import db from '../database.js';
+import { FINANCE_AREA_CATEGORY } from '../lib/financeAreas.js';
 
 const router = express.Router();
 
@@ -417,23 +418,26 @@ router.post('/payments', async (req, res) => {
       (isTickets
         ? `Entradas ${baseDesc}`
         : `${baseDesc}${p.month ? ` — ${p.month}` : ''}`);
-    const txCategory = isTickets
-      ? 'eventos'
+    const txAreaCat = isTickets
+      ? FINANCE_AREA_CATEGORY.eventTickets
       : rental.type === 'one-off'
-        ? 'eventos'
-        : 'agenda';
+        ? FINANCE_AREA_CATEGORY.eventRental
+        : FINANCE_AREA_CATEGORY.workshopRental;
+    const eventId = rental.type === 'one-off' ? rental.id : null;
 
     await client.query(
       `INSERT INTO finance_transactions
-      (id, account_id, type, amount, description, source, category, reference_id, date)
-      VALUES ($1,$2,'income',$3,$4,'agenda',$5,$6,$7)`,
+      (id, account_id, type, amount, description, source, area, category, reference_id, event_id, date)
+      VALUES ($1,$2,'income',$3,$4,'agenda',$5,$6,$7,$8,$9)`,
       [
         txId,
         getFinanceAccountId(p.paymentMethod, p.mercadoPagoAccountId),
         Number(p.amount),
         txDescription,
-        txCategory,
+        txAreaCat.area,
+        txAreaCat.category,
         paymentId,
+        eventId,
         paidDate,
       ],
     );
