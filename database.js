@@ -25,6 +25,7 @@ const CREATE_TABLES = `
     popular SMALLINT NOT NULL DEFAULT 0,
     portions INTEGER NOT NULL DEFAULT 1,
     recipe TEXT NOT NULL DEFAULT '[]',
+    archived SMALLINT NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -295,6 +296,11 @@ async function initDb() {
     if (!menuColNames.includes('recipe')) {
       await client.query(
         "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS recipe TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
+    if (!menuColNames.includes('archived')) {
+      await client.query(
+        'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS archived SMALLINT NOT NULL DEFAULT 0',
       );
     }
 
