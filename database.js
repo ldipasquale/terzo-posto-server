@@ -278,6 +278,45 @@ const CREATE_TABLES = `
     menu_item_id TEXT NOT NULL REFERENCES menu_items(id),
     UNIQUE (discount_preset_id, menu_item_id)
   );
+
+  CREATE TABLE IF NOT EXISTS directorio_rocks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    quarter TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('on-track', 'off-track')),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS directorio_meetings (
+    id TEXT PRIMARY KEY,
+    date DATE NOT NULL,
+    rating INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 10),
+    rock_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    issues JSONB NOT NULL DEFAULT '[]'::jsonb,
+    todo_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    headlines TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS directorio_todos (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    assignee TEXT NOT NULL,
+    done BOOLEAN NOT NULL DEFAULT FALSE,
+    meeting_id TEXT REFERENCES directorio_meetings(id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS directorio_manual_metrics (
+    metric_id TEXT NOT NULL,
+    week_start DATE NOT NULL,
+    value DOUBLE PRECISION NOT NULL,
+    total DOUBLE PRECISION,
+    completed_item_ids JSONB,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (metric_id, week_start)
+  );
 `;
 
 async function initDb() {
@@ -854,6 +893,10 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_discount_preset_menu_items_preset_id ON discount_preset_menu_items(discount_preset_id);
       CREATE INDEX IF NOT EXISTS idx_discount_preset_menu_items_menu_item_id ON discount_preset_menu_items(menu_item_id);
       CREATE INDEX IF NOT EXISTS idx_order_items_promotion_group_id ON order_items(promotion_group_id);
+      CREATE INDEX IF NOT EXISTS idx_directorio_rocks_quarter ON directorio_rocks(quarter);
+      CREATE INDEX IF NOT EXISTS idx_directorio_todos_meeting_id ON directorio_todos(meeting_id);
+      CREATE INDEX IF NOT EXISTS idx_directorio_meetings_date ON directorio_meetings(date);
+      CREATE INDEX IF NOT EXISTS idx_directorio_manual_metrics_week ON directorio_manual_metrics(week_start);
     `);
 
     await client.query(`

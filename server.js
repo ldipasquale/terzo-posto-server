@@ -14,6 +14,7 @@ import purchasesRoutes from './routes/purchases.js';
 import cupsRoutes from './routes/cups.js';
 import promotionsRoutes from './routes/promotions.js';
 import usersRoutes from './routes/users.js';
+import directorioRoutes from './routes/directorio.js';
 import { authenticateToken } from './middleware/auth.js';
 import {
   requireAnyPermission,
@@ -98,6 +99,7 @@ app.use(
   requireAnyPermission(PERMISSIONS.COMANDAS, PERMISSIONS.BUFFET_GESTION),
   promotionsRoutes,
 );
+app.use('/api/directorio', authenticateToken, directorioRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {

@@ -41,6 +41,17 @@ The server will start on `http://localhost:3001` by default.
 - `POST /api/purchases` - Create purchase (JSON body)
 - `POST /api/purchases/parse-ticket` - Analyze a receipt image (`multipart/form-data`, field `image`). Requires `OPENAI_API_KEY`.
 
+### Directorio
+- `GET /api/directorio` - Rocks, to-dos, reuniones y métricas manuales
+- `POST /api/directorio/rocks` - Crear rock
+- `PUT /api/directorio/rocks/:id` - Actualizar rock
+- `DELETE /api/directorio/rocks/:id` - Eliminar rock
+- `POST /api/directorio/todos` - Crear to-do
+- `PUT /api/directorio/todos/:id` - Actualizar to-do
+- `DELETE /api/directorio/todos/:id` - Eliminar to-do
+- `POST /api/directorio/meetings` - Registrar reunión
+- `PUT /api/directorio/manual-metrics` - Upsert de métricas semanales (array)
+
 ### Settings
 - `GET /api/settings/mercado-pago` - Get all Mercado Pago accounts
 - `POST /api/settings/mercado-pago` - Create Mercado Pago account
