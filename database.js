@@ -267,7 +267,7 @@ const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS discount_presets (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    percent DOUBLE PRECISION NOT NULL CHECK (percent > 0 AND percent <= 100),
+    percent DOUBLE PRECISION NOT NULL CHECK (percent >= 0 AND percent <= 100),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -823,6 +823,14 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS room_insurance_price DOUBLE PRECISION;
+    `);
+
+    await client.query(`
+      ALTER TABLE discount_presets DROP CONSTRAINT IF EXISTS discount_presets_percent_check;
+    `);
+    await client.query(`
+      ALTER TABLE discount_presets ADD CONSTRAINT discount_presets_percent_check
+      CHECK (percent >= 0 AND percent <= 100);
     `);
 
     await client.query(`

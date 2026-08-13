@@ -100,8 +100,8 @@ function validateDiscountPresetBody(body, { partial = false } = {}) {
       return { error: 'El porcentaje es requerido' };
     }
     const percentNum = Number(percent);
-    if (!Number.isFinite(percentNum) || percentNum <= 0 || percentNum > 100) {
-      return { error: 'El porcentaje debe estar entre 1 y 100' };
+    if (!Number.isFinite(percentNum) || percentNum < 0 || percentNum > 100) {
+      return { error: 'El porcentaje debe estar entre 0 y 100' };
     }
   }
 
