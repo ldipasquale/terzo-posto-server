@@ -69,7 +69,7 @@ const CREATE_TABLES = `
     customer_name TEXT NOT NULL,
     total DOUBLE PRECISION NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('pending', 'preparing', 'ready', 'delivered')),
-    payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago', 'cuenta_abierta')),
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago', 'cuenta_abierta', 'mixto')),
     mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
     cash_register_id TEXT REFERENCES cash_registers(id),
     open_account_id TEXT,
@@ -88,12 +88,26 @@ const CREATE_TABLES = `
     cash_register_id TEXT NOT NULL REFERENCES cash_registers(id),
     status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
     closed_at TIMESTAMP,
-    payment_method_used TEXT CHECK (payment_method_used IS NULL OR payment_method_used IN ('efectivo', 'mercadopago')),
+    payment_method_used TEXT CHECK (payment_method_used IS NULL OR payment_method_used IN ('efectivo', 'mercadopago', 'mixto')),
     mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
     closed_discount DOUBLE PRECISION,
     closed_discount_reason TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS buffet_payments (
+    id TEXT PRIMARY KEY,
+    order_id TEXT REFERENCES orders(id) ON DELETE CASCADE,
+    open_account_id TEXT REFERENCES open_accounts(id) ON DELETE CASCADE,
+    amount DOUBLE PRECISION NOT NULL CHECK (amount > 0),
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
+    mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT buffet_payments_one_parent CHECK (
+      (order_id IS NOT NULL AND open_account_id IS NULL)
+      OR (order_id IS NULL AND open_account_id IS NOT NULL)
+    )
   );
 
   CREATE TABLE IF NOT EXISTS order_items (
@@ -683,7 +697,39 @@ async function initDb() {
     `);
     await client.query(`
       ALTER TABLE orders ADD CONSTRAINT orders_payment_method_check
-      CHECK (payment_method IN ('efectivo', 'mercadopago', 'cuenta_abierta'));
+      CHECK (payment_method IN ('efectivo', 'mercadopago', 'cuenta_abierta', 'mixto'));
+    `);
+
+    await client.query(`
+      ALTER TABLE open_accounts DROP CONSTRAINT IF EXISTS open_accounts_payment_method_used_check;
+    `);
+    await client.query(`
+      ALTER TABLE open_accounts ADD CONSTRAINT open_accounts_payment_method_used_check
+      CHECK (payment_method_used IS NULL OR payment_method_used IN ('efectivo', 'mercadopago', 'mixto'));
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS buffet_payments (
+        id TEXT PRIMARY KEY,
+        order_id TEXT REFERENCES orders(id) ON DELETE CASCADE,
+        open_account_id TEXT REFERENCES open_accounts(id) ON DELETE CASCADE,
+        amount DOUBLE PRECISION NOT NULL CHECK (amount > 0),
+        payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
+        mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT buffet_payments_one_parent CHECK (
+          (order_id IS NOT NULL AND open_account_id IS NULL)
+          OR (order_id IS NULL AND open_account_id IS NOT NULL)
+        )
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_buffet_payments_order_id
+      ON buffet_payments(order_id)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_buffet_payments_open_account_id
+      ON buffet_payments(open_account_id)
     `);
 
     const openAccountsExists =
@@ -700,7 +746,7 @@ async function initDb() {
           cash_register_id TEXT NOT NULL REFERENCES cash_registers(id),
           status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
           closed_at TIMESTAMP,
-          payment_method_used TEXT CHECK (payment_method_used IS NULL OR payment_method_used IN ('efectivo', 'mercadopago')),
+          payment_method_used TEXT CHECK (payment_method_used IS NULL OR payment_method_used IN ('efectivo', 'mercadopago', 'mixto')),
           mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
           closed_discount DOUBLE PRECISION,
           closed_discount_reason TEXT,

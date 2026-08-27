@@ -3,6 +3,10 @@ import crypto from 'crypto';
 import db from '../database.js';
 import { getUnitCostsForMenuItemIds } from '../lib/menuItemCost.js';
 import { getCupPrice } from '../lib/cupPrice.js';
+import {
+  insertBuffetPayments,
+  parseSplitPayments,
+} from '../lib/buffetPayments.js';
 
 const router = express.Router();
 
@@ -33,7 +37,20 @@ const orderSelectWithItems = `
       'promotionUnitPrice', oi.promotion_unit_price,
       'promotionGroupCost', oi.promotion_group_cost
     )), '[]'::json)
-    FROM order_items oi WHERE oi.order_id = o.id) AS items_json
+    FROM order_items oi WHERE oi.order_id = o.id) AS items_json,
+    (SELECT COALESCE(json_agg(json_build_object(
+      'id', p.id,
+      'amount', p.amount,
+      'paymentMethod', p.payment_method,
+      'mercadoPagoAccountId', p.mercado_pago_account_id
+    ) ORDER BY CASE p.payment_method WHEN 'efectivo' THEN 0 ELSE 1 END), '[]'::json)
+    FROM buffet_payments p
+    WHERE p.order_id = o.id
+       OR (
+         o.closed_open_account_id IS NOT NULL
+         AND p.open_account_id = o.closed_open_account_id
+       )
+    ) AS payments_json
   FROM orders o
 `;
 
@@ -43,7 +60,7 @@ function formatOrder(order) {
     : order.items_json
       ? JSON.parse(order.items_json)
       : [];
-  return {
+  const formatted = {
     id: order.id,
     customerName: order.customer_name,
     items: items.map((item) => {
@@ -108,6 +125,32 @@ function formatOrder(order) {
         ? Number(order.cups_delivered)
         : 0,
   };
+  const payments = formatOrderPayments(order.payments_json);
+  if (payments.length > 0) {
+    formatted.payments = payments;
+  }
+  return formatted;
+}
+
+function formatOrderPayments(raw) {
+  const rows = Array.isArray(raw)
+    ? raw
+    : raw
+      ? JSON.parse(raw)
+      : [];
+  return rows
+    .map((p) => ({
+      id: p.id,
+      amount: Number(p.amount),
+      paymentMethod: p.paymentMethod,
+      mercadoPagoAccountId: p.mercadoPagoAccountId || undefined,
+    }))
+    .filter(
+      (p) =>
+        Number.isFinite(p.amount) &&
+        p.amount > 0 &&
+        (p.paymentMethod === 'efectivo' || p.paymentMethod === 'mercadopago'),
+    );
 }
 
 function computeOrderItemsSubtotal(items) {
@@ -225,11 +268,53 @@ router.get('/', async (req, res) => {
       params.push(status);
     }
     if (paymentMethod) {
-      whereClauses.push(`o.payment_method = $${paramIndex++}`);
-      params.push(paymentMethod);
-      if (paymentMethod === 'mercadopago' && mercadoPagoAccountId) {
-        whereClauses.push(`o.mercado_pago_account_id = $${paramIndex++}`);
-        params.push(mercadoPagoAccountId);
+      if (paymentMethod === 'efectivo') {
+        whereClauses.push(`(
+          o.payment_method = 'efectivo'
+          OR (
+            o.payment_method = 'mixto'
+            AND EXISTS (
+              SELECT 1 FROM buffet_payments p
+              WHERE p.payment_method = 'efectivo'
+                AND (
+                  p.order_id = o.id
+                  OR p.open_account_id = o.closed_open_account_id
+                )
+            )
+          )
+        )`);
+      } else if (paymentMethod === 'mercadopago') {
+        if (mercadoPagoAccountId) {
+          whereClauses.push(`(
+            (o.payment_method = 'mercadopago' AND o.mercado_pago_account_id = $${paramIndex})
+            OR (
+              o.payment_method = 'mixto'
+              AND EXISTS (
+                SELECT 1 FROM buffet_payments p
+                WHERE p.payment_method = 'mercadopago'
+                  AND p.mercado_pago_account_id = $${paramIndex}
+                  AND (
+                    p.order_id = o.id
+                    OR p.open_account_id = o.closed_open_account_id
+                  )
+              )
+            )
+          )`);
+          params.push(mercadoPagoAccountId);
+          paramIndex++;
+        } else {
+          whereClauses.push(`(
+            o.payment_method = 'mercadopago'
+            OR o.payment_method = 'mixto'
+          )`);
+        }
+      } else {
+        whereClauses.push(`o.payment_method = $${paramIndex++}`);
+        params.push(paymentMethod);
+        if (paymentMethod === 'mercadopago' && mercadoPagoAccountId) {
+          whereClauses.push(`o.mercado_pago_account_id = $${paramIndex++}`);
+          params.push(mercadoPagoAccountId);
+        }
       }
     }
     if (type && type !== 'todos') {
@@ -303,6 +388,7 @@ router.post('/', async (req, res) => {
       notes,
       openAccountId,
       cupsDelivered: rawCups,
+      payments: rawPayments,
     } = req.body;
 
     const cupsDelivered =
@@ -325,11 +411,17 @@ router.post('/', async (req, res) => {
       ? 'cuenta_abierta'
       : paymentMethod || 'efectivo';
     if (
-      !['efectivo', 'mercadopago', 'cuenta_abierta'].includes(
+      !['efectivo', 'mercadopago', 'cuenta_abierta', 'mixto'].includes(
         effectivePaymentMethod,
       )
     ) {
       return res.status(400).json({ error: 'paymentMethod inválido' });
+    }
+
+    if (effectivePaymentMethod === 'mixto' && isOpenAccount) {
+      return res.status(400).json({
+        error: 'El pago mixto no se puede combinar con cuenta abierta',
+      });
     }
 
     if (effectivePaymentMethod === 'cuenta_abierta' && !openAccountId) {
@@ -388,6 +480,15 @@ router.post('/', async (req, res) => {
       return res.status(400).json({
         error: 'El total no coincide con ítems, vasos y descuento',
       });
+    }
+
+    let splitPayments = null;
+    if (effectivePaymentMethod === 'mixto') {
+      const parsed = parseSplitPayments(rawPayments, clientTotal);
+      if (parsed.error) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      splitPayments = parsed.payments;
     }
 
     if (cupsDelivered > 0) {
@@ -537,6 +638,13 @@ router.post('/', async (req, res) => {
           ) VALUES ($1, $2, 'delivery', $3, $4, NULL, NULL, NULL, $5)`,
           [movementId, cashRegisterId, cupsDelivered, cupsAmount, orderId],
         );
+      }
+
+      if (splitPayments) {
+        await insertBuffetPayments(client, {
+          orderId,
+          payments: splitPayments,
+        });
       }
 
       await client.query('COMMIT');

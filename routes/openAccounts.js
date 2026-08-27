@@ -2,6 +2,10 @@ import express from 'express';
 import db from '../database.js';
 import { randomUUID } from 'crypto';
 import { snapshotCostsForOrder } from '../lib/orderItemCosts.js';
+import {
+  insertBuffetPayments,
+  parseSplitPayments,
+} from '../lib/buffetPayments.js';
 
 const router = express.Router();
 
@@ -100,18 +104,36 @@ router.post('/', async (req, res) => {
 
 /**
  * POST /open-accounts/:id/close
- * Body: { paymentMethod: 'efectivo' | 'mercadopago', mercadoPagoAccountId?: string, discount?: number, discountReason?: string }
+ * Body: {
+ *   paymentMethod: 'efectivo' | 'mercadopago' | 'mixto',
+ *   mercadoPagoAccountId?: string,
+ *   discount?: number,
+ *   discountReason?: string,
+ *   payments?: Array<{ paymentMethod, amount, mercadoPagoAccountId? }>
+ * }
  * Close the account: update all related orders with the payment method and set closed_open_account_* for history.
  */
 router.post('/:id/close', async (req, res) => {
   try {
     const id = req.params.id;
-    const { paymentMethod, mercadoPagoAccountId, discount, discountReason } = req.body;
+    const {
+      paymentMethod,
+      mercadoPagoAccountId,
+      discount,
+      discountReason,
+      payments: rawPayments,
+    } = req.body;
 
-    if (!paymentMethod || !['efectivo', 'mercadopago'].includes(paymentMethod)) {
-      return res.status(400).json({ error: 'paymentMethod debe ser "efectivo" o "mercadopago"' });
+    const isMixto =
+      paymentMethod === 'mixto' ||
+      (Array.isArray(rawPayments) && rawPayments.length === 2);
+
+    if (isMixto) {
+      // amount due is validated after we load the tab
+    } else if (!paymentMethod || !['efectivo', 'mercadopago'].includes(paymentMethod)) {
+      return res.status(400).json({ error: 'paymentMethod debe ser "efectivo", "mercadopago" o "mixto"' });
     }
-    if (paymentMethod === 'mercadopago' && !mercadoPagoAccountId) {
+    if (!isMixto && paymentMethod === 'mercadopago' && !mercadoPagoAccountId) {
       return res.status(400).json({ error: 'mercadoPagoAccountId requerido para mercadopago' });
     }
 
@@ -139,8 +161,41 @@ router.post('/:id/close', async (req, res) => {
         await snapshotCostsForOrder(client, row.id);
       }
 
-      // If there's a discount, apply it to orders from last to first until fully applied
+      const ordersTotals = await client.query(
+        `SELECT COALESCE(SUM(total), 0)::float AS s FROM orders WHERE open_account_id = $1`,
+        [id],
+      );
+      let amountDue = Number(ordersTotals.rows[0]?.s) || 0;
+      const cupCredit = await client.query(
+        `SELECT COALESCE(SUM(amount), 0)::float AS s FROM cup_movements
+         WHERE type = 'return' AND payment_method = 'cuenta_abierta' AND open_account_id = $1`,
+        [id],
+      );
+      amountDue = Math.max(0, amountDue - (Number(cupCredit.rows[0]?.s) || 0));
+
       const hasDiscount = discount != null && Number(discount) > 0;
+      const discountAmount = hasDiscount ? Number(discount) : 0;
+      if (hasDiscount && discountAmount > 0) {
+        amountDue = Math.max(0, amountDue - discountAmount);
+      }
+
+      let splitPayments = null;
+      let orderPaymentMethod = paymentMethod;
+      let orderMpAccountId =
+        paymentMethod === 'mercadopago' ? mercadoPagoAccountId : null;
+
+      if (isMixto) {
+        const parsed = parseSplitPayments(rawPayments, amountDue);
+        if (parsed.error) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: parsed.error });
+        }
+        splitPayments = parsed.payments;
+        orderPaymentMethod = 'mixto';
+        orderMpAccountId = null;
+      }
+
+      // If there's a discount, apply it to orders from last to first until fully applied
       let ordersToDiscount = [];
       if (hasDiscount && discountReason && String(discountReason).trim()) {
         const ordersResult = await client.query(
@@ -162,15 +217,14 @@ router.post('/:id/close', async (req, res) => {
              updated_at = CURRENT_TIMESTAMP
          WHERE open_account_id = $3`,
         [
-          paymentMethod,
-          paymentMethod === 'mercadopago' ? mercadoPagoAccountId : null,
+          orderPaymentMethod,
+          orderMpAccountId,
           id,
           accountRow.name,
         ]
       );
 
       if (ordersToDiscount.length > 0) {
-        const discountAmount = Number(discount);
         const accountReasonPart = 'Descuento de la cuenta: ' + String(discountReason).trim();
         let remainingDiscount = discountAmount;
 
@@ -198,6 +252,13 @@ router.post('/:id/close', async (req, res) => {
         }
       }
 
+      if (splitPayments) {
+        await insertBuffetPayments(client, {
+          openAccountId: id,
+          payments: splitPayments,
+        });
+      }
+
       await client.query(
         `UPDATE open_accounts
          SET status = 'closed',
@@ -209,8 +270,8 @@ router.post('/:id/close', async (req, res) => {
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $5`,
         [
-          paymentMethod,
-          paymentMethod === 'mercadopago' ? mercadoPagoAccountId : null,
+          orderPaymentMethod,
+          orderMpAccountId,
           discount != null ? Number(discount) : null,
           discountReason && String(discountReason).trim() ? String(discountReason).trim() : null,
           id,
