@@ -46,6 +46,7 @@ function mapTodo(row) {
     assignee: row.assignee,
     done: Boolean(row.done),
     meetingId: row.meeting_id || undefined,
+    position: Number(row.position ?? 0),
     createdAt: new Date(row.created_at).toISOString(),
   };
 }
@@ -81,7 +82,9 @@ function mapManualMetric(row) {
 async function fetchAll() {
   const [rocks, todos, meetings, metrics] = await Promise.all([
     db.query('SELECT * FROM directorio_rocks ORDER BY created_at ASC'),
-    db.query('SELECT * FROM directorio_todos ORDER BY created_at ASC'),
+    db.query(
+      'SELECT * FROM directorio_todos ORDER BY done ASC, position ASC, created_at ASC',
+    ),
     db.query('SELECT * FROM directorio_meetings ORDER BY date DESC, created_at DESC'),
     db.query(
       'SELECT * FROM directorio_manual_metrics ORDER BY week_start DESC, metric_id ASC',
@@ -199,16 +202,55 @@ router.post('/todos', async (req, res) => {
       return res.status(400).json({ error: 'Responsable inválido' });
     }
     const id = crypto.randomUUID();
+    const posResult = await db.query(
+      `SELECT COALESCE(MAX(position), -1) + 1 AS next_position
+       FROM directorio_todos
+       WHERE done = FALSE`,
+    );
+    const position = Number(posResult.rows[0]?.next_position ?? 0);
     const result = await db.query(
-      `INSERT INTO directorio_todos (id, title, assignee, done, meeting_id)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO directorio_todos (id, title, assignee, done, meeting_id, position)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
-      [id, title.trim(), assignee, Boolean(done), meetingId || null],
+      [id, title.trim(), assignee, Boolean(done), meetingId || null, position],
     );
     res.status(201).json(mapTodo(result.rows[0]));
   } catch (error) {
     console.error('Error creating todo:', error);
     res.status(500).json({ error: 'Error al crear el to-do' });
+  }
+});
+
+router.put('/todos/reorder', async (req, res) => {
+  try {
+    const orderedIds = req.body?.orderedIds;
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ error: 'orderedIds es requerido' });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      for (let i = 0; i < orderedIds.length; i++) {
+        await client.query(
+          `UPDATE directorio_todos
+           SET position = $1
+           WHERE id = $2 AND done = FALSE`,
+          [i, String(orderedIds[i])],
+        );
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error('Error reordering todos:', error);
+    res.status(500).json({ error: 'Error al reordenar los to-dos' });
   }
 });
 
