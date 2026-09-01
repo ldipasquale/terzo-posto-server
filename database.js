@@ -4,12 +4,12 @@ import bcrypt from 'bcryptjs';
 const { Pool } = pg;
 
 const DATABASE_URL = process.env.DATABASE_URL;
+const isLocalDb =
+  !DATABASE_URL || /localhost|127\.0\.0\.1/.test(DATABASE_URL);
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  // ssl: {
-  //   rejectUnauthorized: false,
-  // },
+  ssl: isLocalDb ? false : { rejectUnauthorized: false },
 });
 
 // Create tables (PostgreSQL DDL)
@@ -207,6 +207,11 @@ const CREATE_TABLES = `
     revenue_share_percent DOUBLE PRECISION,
     room_insurance_price DOUBLE PRECISION,
     date_slots JSONB,
+    staff_count INTEGER,
+    staff_food TEXT,
+    staff_drinks TEXT,
+    event_timeline TEXT,
+    technical_needs TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -871,6 +876,21 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS room_insurance_price DOUBLE PRECISION;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS staff_count INTEGER;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS staff_food TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS staff_drinks TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS event_timeline TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS technical_needs TEXT;
     `);
 
     await client.query(`

@@ -21,6 +21,27 @@ function normalizeIncomingDate(value) {
   return s.includes('T') ? s.slice(0, 10) : s.slice(0, 10);
 }
 
+function optionalBodyField(body, key, normalize) {
+  const present = Object.prototype.hasOwnProperty.call(body, key);
+  return {
+    present,
+    value: present ? normalize(body[key]) : null,
+  };
+}
+
+function emptyToNullText(value) {
+  if (value == null) return null;
+  const t = String(value).trim();
+  return t === '' ? null : t;
+}
+
+function emptyToNullCount(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(n);
+}
+
 const mapRoom = (row) => ({
   id: row.id,
   name: row.name,
@@ -59,6 +80,11 @@ const mapRental = (row) => ({
     row.room_insurance_price != null
       ? Number(row.room_insurance_price)
       : undefined,
+  staffCount: row.staff_count != null ? Number(row.staff_count) : undefined,
+  staffFood: row.staff_food || undefined,
+  staffDrinks: row.staff_drinks || undefined,
+  eventTimeline: row.event_timeline || undefined,
+  technicalNeeds: row.technical_needs || undefined,
   dateSlots: row.date_slots || undefined,
   createdAt: new Date(row.created_at).toISOString(),
 });
@@ -218,12 +244,14 @@ router.post('/rentals', async (req, res) => {
       `INSERT INTO agenda_rentals (
         id, type, person_name, person_phone, activity_name, room_id, notes, finalized,
         schedules, price_per_hour, start_month, end_month, event_type, date, start_time, end_time,
-        fixed_price, consumption_credit, has_tickets, ticket_price, revenue_share_percent, room_insurance_price, date_slots
+        fixed_price, consumption_credit, has_tickets, ticket_price, revenue_share_percent, room_insurance_price, date_slots,
+        staff_count, staff_food, staff_drinks, event_timeline, technical_needs
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22, $23
+        $17, $18, $19, $20, $21, $22, $23,
+        $24, $25, $26, $27, $28
       )`,
       [
         id,
@@ -249,6 +277,11 @@ router.post('/rentals', async (req, res) => {
         r.revenueSharePercent ?? null,
         r.roomInsurancePrice ?? null,
         r.dateSlots ? JSON.stringify(r.dateSlots) : null,
+        emptyToNullCount(r.staffCount),
+        emptyToNullText(r.staffFood),
+        emptyToNullText(r.staffDrinks),
+        emptyToNullText(r.eventTimeline),
+        emptyToNullText(r.technicalNeeds),
       ],
     );
     const created = await db.query(
@@ -281,6 +314,19 @@ router.put('/rentals/:id', async (req, res) => {
         ? null
         : String(r.notes).trim()
       : null;
+    const staffCountField = optionalBodyField(r, 'staffCount', emptyToNullCount);
+    const staffFoodField = optionalBodyField(r, 'staffFood', emptyToNullText);
+    const staffDrinksField = optionalBodyField(r, 'staffDrinks', emptyToNullText);
+    const eventTimelineField = optionalBodyField(
+      r,
+      'eventTimeline',
+      emptyToNullText,
+    );
+    const technicalNeedsField = optionalBodyField(
+      r,
+      'technicalNeeds',
+      emptyToNullText,
+    );
     const result = await db.query(
       `UPDATE agenda_rentals SET
         type = COALESCE($1, type),
@@ -305,6 +351,11 @@ router.put('/rentals/:id', async (req, res) => {
         revenue_share_percent = COALESCE($20, revenue_share_percent),
         room_insurance_price = COALESCE($21, room_insurance_price),
         date_slots = COALESCE($22, date_slots),
+        staff_count = CASE WHEN $26::boolean THEN $25 ELSE staff_count END,
+        staff_food = CASE WHEN $28::boolean THEN $27 ELSE staff_food END,
+        staff_drinks = CASE WHEN $30::boolean THEN $29 ELSE staff_drinks END,
+        event_timeline = CASE WHEN $32::boolean THEN $31 ELSE event_timeline END,
+        technical_needs = CASE WHEN $34::boolean THEN $33 ELSE technical_needs END,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = $23`,
       [
@@ -332,6 +383,16 @@ router.put('/rentals/:id', async (req, res) => {
         r.dateSlots ? JSON.stringify(r.dateSlots) : null,
         id,
         hasNotes,
+        staffCountField.value,
+        staffCountField.present,
+        staffFoodField.value,
+        staffFoodField.present,
+        staffDrinksField.value,
+        staffDrinksField.present,
+        eventTimelineField.value,
+        eventTimelineField.present,
+        technicalNeedsField.value,
+        technicalNeedsField.present,
       ],
     );
     if (result.rowCount === 0)
