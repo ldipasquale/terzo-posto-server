@@ -320,7 +320,8 @@ const CREATE_TABLES = `
     done BOOLEAN NOT NULL DEFAULT FALSE,
     meeting_id TEXT REFERENCES directorio_meetings(id) ON DELETE SET NULL,
     position INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS directorio_manual_metrics (
@@ -951,6 +952,10 @@ async function initDb() {
     `);
     await client.query(`
       ALTER TABLE directorio_todos ALTER COLUMN position SET NOT NULL
+    `);
+
+    await client.query(`
+      ALTER TABLE directorio_todos ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP
     `);
 
     await client.query(`

@@ -48,6 +48,9 @@ function mapTodo(row) {
     meetingId: row.meeting_id || undefined,
     position: Number(row.position ?? 0),
     createdAt: new Date(row.created_at).toISOString(),
+    completedAt: row.completed_at
+      ? new Date(row.completed_at).toISOString()
+      : undefined,
   };
 }
 
@@ -208,11 +211,20 @@ router.post('/todos', async (req, res) => {
        WHERE done = FALSE`,
     );
     const position = Number(posResult.rows[0]?.next_position ?? 0);
+    const isDone = Boolean(done);
     const result = await db.query(
-      `INSERT INTO directorio_todos (id, title, assignee, done, meeting_id, position)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO directorio_todos (id, title, assignee, done, meeting_id, position, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [id, title.trim(), assignee, Boolean(done), meetingId || null, position],
+      [
+        id,
+        title.trim(),
+        assignee,
+        isDone,
+        meetingId || null,
+        position,
+        isDone ? new Date() : null,
+      ],
     );
     res.status(201).json(mapTodo(result.rows[0]));
   } catch (error) {
@@ -280,12 +292,18 @@ router.put('/todos/:id', async (req, res) => {
       req.body.meetingId !== undefined
         ? req.body.meetingId || null
         : current.meeting_id;
+    const doneChanged = Boolean(current.done) !== done;
+    const completedAt = done
+      ? doneChanged || !current.completed_at
+        ? new Date()
+        : current.completed_at
+      : null;
     const result = await db.query(
       `UPDATE directorio_todos
-       SET title = $1, assignee = $2, done = $3, meeting_id = $4
-       WHERE id = $5
+       SET title = $1, assignee = $2, done = $3, meeting_id = $4, completed_at = $5
+       WHERE id = $6
        RETURNING *`,
-      [title, assignee, done, meetingId, req.params.id],
+      [title, assignee, done, meetingId, completedAt, req.params.id],
     );
     res.json(mapTodo(result.rows[0]));
   } catch (error) {
