@@ -78,6 +78,7 @@ const CREATE_TABLES = `
     discount DOUBLE PRECISION,
     discount_reason TEXT,
     notes TEXT,
+    beeper_number INTEGER CHECK (beeper_number IS NULL OR (beeper_number >= 1 AND beeper_number <= 20)),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -833,6 +834,12 @@ async function initDb() {
     if (!ordersColNames.includes('cups_delivered')) {
       await client.query(
         'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cups_delivered INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+    if (!ordersColNames.includes('beeper_number')) {
+      await client.query(
+        `ALTER TABLE orders ADD COLUMN IF NOT EXISTS beeper_number INTEGER
+         CHECK (beeper_number IS NULL OR (beeper_number >= 1 AND beeper_number <= 20))`,
       );
     }
 

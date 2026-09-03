@@ -124,6 +124,10 @@ function formatOrder(order) {
       order.cups_delivered != null && order.cups_delivered !== ''
         ? Number(order.cups_delivered)
         : 0,
+    beeperNumber:
+      order.beeper_number != null && order.beeper_number !== ''
+        ? Number(order.beeper_number)
+        : undefined,
   };
   const payments = formatOrderPayments(order.payments_json);
   if (payments.length > 0) {
@@ -389,6 +393,7 @@ router.post('/', async (req, res) => {
       openAccountId,
       cupsDelivered: rawCups,
       payments: rawPayments,
+      beeperNumber: rawBeeper,
     } = req.body;
 
     const cupsDelivered =
@@ -396,8 +401,34 @@ router.post('/', async (req, res) => {
         ? Math.max(0, Math.floor(Number(rawCups)))
         : 0;
 
-    if (!customerName || !items || !Array.isArray(items) || total === undefined) {
+    const resolvedCustomerName =
+      customerName != null && String(customerName).trim()
+        ? String(customerName).trim()
+        : '—';
+
+    if (!items || !Array.isArray(items) || total === undefined) {
       return res.status(400).json({ error: 'Datos del pedido incompletos' });
+    }
+
+    const hasFood = items.some((item) => item?.menuItem?.type === 'comida');
+    let beeperNumber = null;
+    if (rawBeeper != null && rawBeeper !== '') {
+      const parsedBeeper = Number(rawBeeper);
+      if (
+        !Number.isInteger(parsedBeeper) ||
+        parsedBeeper < 1 ||
+        parsedBeeper > 20
+      ) {
+        return res.status(400).json({
+          error: 'El número de Beeper debe ser un entero entre 1 y 20',
+        });
+      }
+      beeperNumber = parsedBeeper;
+    }
+    if (hasFood && beeperNumber == null) {
+      return res.status(400).json({
+        error: 'El número de Beeper es obligatorio para pedidos con comida',
+      });
     }
 
     if (items.length === 0 && cupsDelivered <= 0) {
@@ -555,11 +586,11 @@ router.post('/', async (req, res) => {
       );
 
       await client.query(
-        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, cash_register_id, open_account_id, discount, discount_reason, notes, cups_delivered)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        `INSERT INTO orders (id, customer_name, total, status, payment_method, mercado_pago_account_id, cash_register_id, open_account_id, discount, discount_reason, notes, cups_delivered, beeper_number)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         [
           orderId,
-          customerName,
+          resolvedCustomerName,
           clientTotal,
           status || 'pending',
           effectivePaymentMethod,
@@ -572,6 +603,7 @@ router.post('/', async (req, res) => {
           discountReason ?? null,
           notes ?? null,
           cupsDelivered,
+          beeperNumber,
         ],
       );
 

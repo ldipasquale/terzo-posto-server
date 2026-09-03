@@ -70,7 +70,8 @@ const mapRental = (row) => ({
   fixedPrice: row.fixed_price != null ? Number(row.fixed_price) : undefined,
   consumptionCredit:
     row.consumption_credit != null ? Number(row.consumption_credit) : undefined,
-  hasTickets: row.has_tickets == null ? undefined : Boolean(row.has_tickets),
+  hasTickets:
+    row.has_tickets == null ? undefined : Number(row.has_tickets) === 1,
   ticketPrice: row.ticket_price != null ? Number(row.ticket_price) : undefined,
   revenueSharePercent:
     row.revenue_share_percent != null
