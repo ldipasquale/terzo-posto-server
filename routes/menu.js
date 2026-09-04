@@ -4,7 +4,7 @@ import db from '../database.js';
 const router = express.Router();
 
 const MENU_ITEM_COLUMNS =
-  'id, name, description, price, category, type, available, popular, portions, recipe, archived';
+  'id, name, description, price, category, type, available, popular, portions, recipe, archived, requires_kitchen';
 
 function parseRecipe(recipeJson) {
   if (typeof recipeJson !== 'string') return [];
@@ -45,6 +45,11 @@ function formatMenuItem(item) {
     portions: item.portions != null ? item.portions : 1,
     recipe: normalizeMenuRecipe(parseRecipe(item.recipe)),
     archived: Boolean(item.archived),
+    requiresKitchen:
+      item.type === 'comida' &&
+      (item.requires_kitchen == null
+        ? true
+        : Boolean(Number(item.requires_kitchen))),
   };
 }
 
@@ -105,6 +110,7 @@ router.post('/', async (req, res) => {
       portions,
       recipe,
       archived,
+      requiresKitchen: requiresKitchenBody,
     } = req.body;
 
     if (!id || !name || price === undefined || !category || !type) {
@@ -123,10 +129,12 @@ router.post('/', async (req, res) => {
     const recipeJson = JSON.stringify(recipeNormalized);
     const portionsNum =
       typeof portions === 'number' && portions >= 1 ? portions : 1;
+    const requiresKitchen =
+      type === 'comida' ? (requiresKitchenBody === false ? 0 : 1) : 0;
 
     await db.query(
-      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, archived)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, archived, requires_kitchen)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         id,
         name,
@@ -139,6 +147,7 @@ router.post('/', async (req, res) => {
         portionsNum,
         recipeJson,
         archived ? 1 : 0,
+        requiresKitchen,
       ],
     );
 
@@ -194,6 +203,16 @@ router.put('/:id', async (req, res) => {
           ? 1
           : 0
         : existing.archived;
+    const requiresKitchen =
+      type === 'comida'
+        ? body.requiresKitchen !== undefined
+          ? body.requiresKitchen
+            ? 1
+            : 0
+          : existing.requires_kitchen == null
+            ? 1
+            : existing.requires_kitchen
+        : 0;
 
     let recipeJson = existing.recipe;
     if (body.recipe !== undefined) {
@@ -221,8 +240,8 @@ router.put('/:id', async (req, res) => {
       `UPDATE menu_items
        SET name = $1, description = $2, price = $3, category = $4, type = $5,
            available = $6, popular = $7, portions = $8, recipe = $9, archived = $10,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $11`,
+           requires_kitchen = $11, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $12`,
       [
         name,
         description,
@@ -234,6 +253,7 @@ router.put('/:id', async (req, res) => {
         portionsNum,
         recipeJson,
         archived,
+        requiresKitchen,
         req.params.id,
       ],
     );

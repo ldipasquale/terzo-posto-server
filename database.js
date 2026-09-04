@@ -26,6 +26,7 @@ const CREATE_TABLES = `
     portions INTEGER NOT NULL DEFAULT 1,
     recipe TEXT NOT NULL DEFAULT '[]',
     archived SMALLINT NOT NULL DEFAULT 0,
+    requires_kitchen SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -62,7 +63,8 @@ const CREATE_TABLES = `
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     closed_at TIMESTAMP,
     closing_data JSONB,
-    opening_checklist JSONB
+    opening_checklist JSONB,
+    kitchen_open SMALLINT NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS orders (
@@ -365,6 +367,11 @@ async function initDb() {
     if (!menuColNames.includes('archived')) {
       await client.query(
         'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS archived SMALLINT NOT NULL DEFAULT 0',
+      );
+    }
+    if (!menuColNames.includes('requires_kitchen')) {
+      await client.query(
+        'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS requires_kitchen SMALLINT NOT NULL DEFAULT 1',
       );
     }
 
@@ -808,7 +815,8 @@ async function initDb() {
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           closed_at TIMESTAMP,
           closing_data JSONB,
-          opening_checklist JSONB
+          opening_checklist JSONB,
+          kitchen_open SMALLINT NOT NULL DEFAULT 0
         )
       `);
     }
@@ -831,6 +839,11 @@ async function initDb() {
     if (!cashRegisterColNames.includes('opening_checklist')) {
       await client.query(
         'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS opening_checklist JSONB',
+      );
+    }
+    if (!cashRegisterColNames.includes('kitchen_open')) {
+      await client.query(
+        'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS kitchen_open SMALLINT NOT NULL DEFAULT 0',
       );
     }
     if (!ordersColNames.includes('cash_register_id')) {

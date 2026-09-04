@@ -194,6 +194,7 @@ function formatCashRegister(row) {
       Array.isArray(row.opening_checklist.items)
         ? row.opening_checklist
         : undefined,
+    kitchenOpen: Boolean(Number(row.kitchen_open)),
     createdAt: new Date(row.created_at).toISOString(),
   };
 }
@@ -383,7 +384,9 @@ router.patch("/:id/close", async (req, res) => {
         caja.event_id || null,
       );
       await client.query(
-        `UPDATE cash_registers SET status = 'closed', closed_at = $1, closing_data = $2 WHERE id = $3`,
+        `UPDATE cash_registers
+         SET status = 'closed', closed_at = $1, closing_data = $2, kitchen_open = 0
+         WHERE id = $3`,
         [now, JSON.stringify(mergedClosingData), id]
       );
       await client.query("COMMIT");
@@ -402,6 +405,101 @@ router.patch("/:id/close", async (req, res) => {
       return res.status(400).json({ error: error.message });
     }
     res.status(500).json({ error: "Error al cerrar la caja" });
+  }
+});
+
+async function applyFoodAvailability(client, availableFoodItemIds) {
+  if (!Array.isArray(availableFoodItemIds)) {
+    const err = new Error("Seleccioná los platos disponibles");
+    err.statusCode = 400;
+    throw err;
+  }
+  const ids = [
+    ...new Set(
+      availableFoodItemIds
+        .map((id) => (id == null ? "" : String(id).trim()))
+        .filter(Boolean),
+    ),
+  ];
+
+  if (ids.length > 0) {
+    const found = await client.query(
+      `SELECT id FROM menu_items
+       WHERE id = ANY($1::text[]) AND type = 'comida' AND archived = 0
+         AND requires_kitchen = 1`,
+      [ids],
+    );
+    if (found.rows.length !== ids.length) {
+      const err = new Error("Uno o más platos no existen o no son de cocina");
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  await client.query(
+    `UPDATE menu_items
+     SET available = 0, updated_at = CURRENT_TIMESTAMP
+     WHERE type = 'comida' AND archived = 0 AND requires_kitchen = 1`,
+  );
+  if (ids.length > 0) {
+    await client.query(
+      `UPDATE menu_items
+       SET available = 1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ANY($1::text[])`,
+      [ids],
+    );
+  }
+}
+
+// PATCH /api/cash-registers/:id/kitchen — abrir/cerrar cocina y menú de comida
+router.patch("/:id/kitchen", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { open, availableFoodItemIds } = req.body ?? {};
+    if (typeof open !== "boolean") {
+      return res.status(400).json({ error: "open debe ser true o false" });
+    }
+
+    const check = await db.query(
+      "SELECT id, status FROM cash_registers WHERE id = $1",
+      [id],
+    );
+    const caja = check.rows[0];
+    if (!caja) {
+      return res.status(404).json({ error: "Caja no encontrada" });
+    }
+    if (caja.status !== "open") {
+      return res.status(400).json({ error: "La caja no está abierta" });
+    }
+
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "UPDATE cash_registers SET kitchen_open = $1 WHERE id = $2",
+        [open ? 1 : 0, id],
+      );
+      if (open) {
+        await applyFoodAvailability(client, availableFoodItemIds);
+      }
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    const result = await db.query("SELECT * FROM cash_registers WHERE id = $1", [
+      id,
+    ]);
+    res.json(formatCashRegister(result.rows[0]));
+  } catch (error) {
+    console.error("Error updating kitchen:", error);
+    if (error.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
+    res.status(500).json({ error: "Error al actualizar la cocina" });
   }
 });
 

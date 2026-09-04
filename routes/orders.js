@@ -410,7 +410,51 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Datos del pedido incompletos' });
     }
 
-    const hasFood = items.some((item) => item?.menuItem?.type === 'comida');
+    const menuIdsForKitchen = items
+      .map((item) => item?.menuItem?.id)
+      .filter(Boolean);
+    let hasFood = items.some((item) => item?.menuItem?.type === 'comida');
+    if (menuIdsForKitchen.length > 0) {
+      const menuTypeRows = await db.query(
+        `SELECT id, type, available, requires_kitchen FROM menu_items WHERE id = ANY($1::text[])`,
+        [menuIdsForKitchen],
+      );
+      const menuById = new Map(menuTypeRows.rows.map((row) => [row.id, row]));
+      const foodItems = items.filter((item) => {
+        const row = menuById.get(item?.menuItem?.id);
+        return row?.type === 'comida';
+      });
+      hasFood = foodItems.length > 0;
+      const kitchenFoodItems = foodItems.filter((item) => {
+        const row = menuById.get(item.menuItem.id);
+        return Number(row?.requires_kitchen) !== 0;
+      });
+      if (kitchenFoodItems.length > 0) {
+        const cr = await db.query(
+          'SELECT kitchen_open, status FROM cash_registers WHERE id = $1',
+          [cashRegisterId],
+        );
+        const caja = cr.rows[0];
+        if (!caja || caja.status !== 'open' || Number(caja.kitchen_open) !== 1) {
+          return res.status(400).json({
+            error:
+              'La cocina está cerrada. No se pueden tomar pedidos de comida.',
+          });
+        }
+      }
+      if (hasFood) {
+        const unavailableFood = foodItems.some((item) => {
+          const row = menuById.get(item.menuItem.id);
+          return !row || Number(row.available) !== 1;
+        });
+        if (unavailableFood) {
+          return res.status(400).json({
+            error: 'Uno o más platos no están disponibles',
+          });
+        }
+      }
+    }
+
     let beeperNumber = null;
     if (rawBeeper != null && rawBeeper !== '') {
       const parsedBeeper = Number(rawBeeper);
