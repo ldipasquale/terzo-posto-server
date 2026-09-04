@@ -6,6 +6,12 @@ import {
   invalidateCupPriceCache,
   BUFFET_CUP_PRICE_SETTINGS_KEY,
 } from '../lib/cupPrice.js';
+import { requireAdminMiddleware } from '../middleware/requirePermission.js';
+import {
+  OPENING_CHECKLIST_SETTINGS_KEY,
+  getDefaultOpeningChecklistTemplate,
+  normalizeOpeningChecklistTemplate,
+} from '../lib/openingChecklist.js';
 
 const router = express.Router();
 
@@ -310,6 +316,64 @@ router.delete('/discount-presets/:id', async (req, res) => {
   } catch (error) {
     console.error('Error deleting discount preset:', error);
     res.status(500).json({ error: 'Error al eliminar el descuento' });
+  }
+});
+
+async function readOpeningChecklistTemplate() {
+  const result = await db.query('SELECT value FROM settings WHERE key = $1', [
+    OPENING_CHECKLIST_SETTINGS_KEY,
+  ]);
+  const raw = result.rows[0]?.value;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+router.get('/opening-checklist', async (_req, res) => {
+  try {
+    const stored = await readOpeningChecklistTemplate();
+    if (stored) {
+      const normalized = normalizeOpeningChecklistTemplate(stored);
+      if (!normalized.error) {
+        return res.json(normalized.data);
+      }
+    }
+
+    const defaults = getDefaultOpeningChecklistTemplate();
+    await db.query(
+      `INSERT INTO settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO NOTHING`,
+      [OPENING_CHECKLIST_SETTINGS_KEY, JSON.stringify(defaults)],
+    );
+    const seeded = await readOpeningChecklistTemplate();
+    const normalized = normalizeOpeningChecklistTemplate(seeded || defaults);
+    res.json(normalized.data || defaults);
+  } catch (error) {
+    console.error('Error fetching opening checklist:', error);
+    res.status(500).json({ error: 'Error al obtener el checklist de apertura' });
+  }
+});
+
+router.put('/opening-checklist', requireAdminMiddleware, async (req, res) => {
+  try {
+    const normalized = normalizeOpeningChecklistTemplate(req.body);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    await db.query(
+      `INSERT INTO settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
+      [OPENING_CHECKLIST_SETTINGS_KEY, JSON.stringify(normalized.data)],
+    );
+    res.json(normalized.data);
+  } catch (error) {
+    console.error('Error updating opening checklist:', error);
+    res.status(500).json({ error: 'Error al guardar el checklist de apertura' });
   }
 });
 

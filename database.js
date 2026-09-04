@@ -61,7 +61,8 @@ const CREATE_TABLES = `
     status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     closed_at TIMESTAMP,
-    closing_data JSONB
+    closing_data JSONB,
+    opening_checklist JSONB
   );
 
   CREATE TABLE IF NOT EXISTS orders (
@@ -806,7 +807,8 @@ async function initDb() {
           status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           closed_at TIMESTAMP,
-          closing_data JSONB
+          closing_data JSONB,
+          opening_checklist JSONB
         )
       `);
     }
@@ -824,6 +826,11 @@ async function initDb() {
     if (!cashRegisterColNames.includes('mp_starting_balance')) {
       await client.query(
         'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS mp_starting_balance DOUBLE PRECISION',
+      );
+    }
+    if (!cashRegisterColNames.includes('opening_checklist')) {
+      await client.query(
+        'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS opening_checklist JSONB',
       );
     }
     if (!ordersColNames.includes('cash_register_id')) {

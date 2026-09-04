@@ -7,6 +7,7 @@ import {
   getBuffetCloseSplitForCashRegister,
   splitAmountByFoodDrinkCups,
 } from "../lib/foodDrinkSplit.js";
+import { normalizeOpeningChecklistRecord } from "../lib/openingChecklist.js";
 
 const router = express.Router();
 
@@ -187,6 +188,12 @@ function formatCashRegister(row) {
     status: row.status,
     closedAt: row.closed_at ? new Date(row.closed_at).toISOString() : undefined,
     closingData: row.closing_data || undefined,
+    openingChecklist:
+      row.opening_checklist &&
+      typeof row.opening_checklist === "object" &&
+      Array.isArray(row.opening_checklist.items)
+        ? row.opening_checklist
+        : undefined,
     createdAt: new Date(row.created_at).toISOString(),
   };
 }
@@ -250,8 +257,14 @@ router.get("/current", async (req, res) => {
 // POST /api/cash-registers — open a new cash register
 router.post("/", async (req, res) => {
   try {
-    const { mercadoPagoAccountId, eventId, eventName, startingCash, mpStartingBalance } =
-      req.body;
+    const {
+      mercadoPagoAccountId,
+      eventId,
+      eventName,
+      startingCash,
+      mpStartingBalance,
+      openingChecklist,
+    } = req.body;
     if (!mercadoPagoAccountId) {
       return res.status(400).json({ error: "Cuenta de Mercado Pago es requerida" });
     }
@@ -279,13 +292,20 @@ router.post("/", async (req, res) => {
       mpStartingBalanceDb = n;
     }
 
+    const normalizedChecklist = normalizeOpeningChecklistRecord(
+      openingChecklist ?? null,
+    );
+    if (normalizedChecklist.error) {
+      return res.status(400).json({ error: normalizedChecklist.error });
+    }
+
     const id = crypto.randomUUID();
     const now = new Date();
     const date = now.toISOString().split("T")[0];
 
     await db.query(
-      `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')`,
+      `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, status, opening_checklist)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)`,
       [
         id,
         date,
@@ -294,6 +314,9 @@ router.post("/", async (req, res) => {
         eventName || null,
         startingCash ?? null,
         mpStartingBalanceDb,
+        normalizedChecklist.record
+          ? JSON.stringify(normalizedChecklist.record)
+          : null,
       ]
     );
 
