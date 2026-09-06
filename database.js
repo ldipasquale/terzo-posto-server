@@ -327,6 +327,8 @@ const CREATE_TABLES = `
     title TEXT NOT NULL,
     assignee TEXT NOT NULL,
     done BOOLEAN NOT NULL DEFAULT FALSE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    blocked_reason TEXT,
     meeting_id TEXT REFERENCES directorio_meetings(id) ON DELETE SET NULL,
     position INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1003,6 +1005,23 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE directorio_todos ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP
+    `);
+    await client.query(`
+      ALTER TABLE directorio_todos ADD COLUMN IF NOT EXISTS status TEXT
+    `);
+    await client.query(`
+      ALTER TABLE directorio_todos ADD COLUMN IF NOT EXISTS blocked_reason TEXT
+    `);
+    await client.query(`
+      UPDATE directorio_todos
+      SET status = CASE WHEN done THEN 'done' ELSE 'pending' END
+      WHERE status IS NULL
+    `);
+    await client.query(`
+      ALTER TABLE directorio_todos ALTER COLUMN status SET DEFAULT 'pending'
+    `);
+    await client.query(`
+      ALTER TABLE directorio_todos ALTER COLUMN status SET NOT NULL
     `);
 
     await client.query(`

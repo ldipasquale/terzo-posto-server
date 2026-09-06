@@ -6,6 +6,41 @@ const router = express.Router();
 
 const PARTNERS = ['Lucho', 'Bachi', 'Luli'];
 const ROCK_STATUSES = ['on-track', 'off-track'];
+const TODO_STATUSES = ['pending', 'blocked', 'future', 'done'];
+
+function normalizeTodoState(body, current) {
+  const doneProvided = body?.done != null;
+  const statusProvided = body?.status != null;
+  let done = doneProvided ? Boolean(body.done) : Boolean(current?.done);
+  let status = statusProvided
+    ? String(body.status)
+    : (current?.status ?? (done ? 'done' : 'pending'));
+
+  if (!TODO_STATUSES.includes(status)) {
+    return { error: 'Estado inválido' };
+  }
+
+  if (done || status === 'done') {
+    done = true;
+    status = 'done';
+  } else {
+    done = false;
+  }
+
+  let blockedReason = null;
+  if (status === 'blocked') {
+    const raw =
+      body?.blockedReason !== undefined
+        ? body.blockedReason
+        : current?.blocked_reason;
+    blockedReason = raw != null ? String(raw).trim() : '';
+    if (!blockedReason) {
+      return { error: 'El motivo del bloqueo es requerido' };
+    }
+  }
+
+  return { done, status, blockedReason };
+}
 
 function sqlDateToYmd(value) {
   if (value == null || value === '') return undefined;
@@ -40,11 +75,15 @@ function mapRock(row) {
 }
 
 function mapTodo(row) {
+  const done = Boolean(row.done);
+  const status = row.status || (done ? 'done' : 'pending');
   return {
     id: row.id,
     title: row.title,
     assignee: row.assignee,
-    done: Boolean(row.done),
+    done,
+    status,
+    blockedReason: row.blocked_reason || undefined,
     meetingId: row.meeting_id || undefined,
     position: Number(row.position ?? 0),
     createdAt: new Date(row.created_at).toISOString(),
@@ -197,12 +236,16 @@ router.delete('/rocks/:id', async (req, res) => {
 
 router.post('/todos', async (req, res) => {
   try {
-    const { title, assignee, done, meetingId } = req.body ?? {};
+    const { title, assignee, meetingId } = req.body ?? {};
     if (!title || typeof title !== 'string' || !title.trim()) {
       return res.status(400).json({ error: 'El título es requerido' });
     }
     if (!PARTNERS.includes(assignee)) {
       return res.status(400).json({ error: 'Responsable inválido' });
+    }
+    const normalized = normalizeTodoState(req.body ?? {}, null);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
     }
     const id = crypto.randomUUID();
     const posResult = await db.query(
@@ -211,19 +254,20 @@ router.post('/todos', async (req, res) => {
        WHERE done = FALSE`,
     );
     const position = Number(posResult.rows[0]?.next_position ?? 0);
-    const isDone = Boolean(done);
     const result = await db.query(
-      `INSERT INTO directorio_todos (id, title, assignee, done, meeting_id, position, completed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO directorio_todos (id, title, assignee, done, status, blocked_reason, meeting_id, position, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
       [
         id,
         title.trim(),
         assignee,
-        isDone,
+        normalized.done,
+        normalized.status,
+        normalized.blockedReason,
         meetingId || null,
         position,
-        isDone ? new Date() : null,
+        normalized.done ? new Date() : null,
       ],
     );
     res.status(201).json(mapTodo(result.rows[0]));
@@ -286,24 +330,36 @@ router.put('/todos/:id', async (req, res) => {
     if (!PARTNERS.includes(assignee)) {
       return res.status(400).json({ error: 'Responsable inválido' });
     }
-    const done =
-      req.body.done != null ? Boolean(req.body.done) : Boolean(current.done);
+    const normalized = normalizeTodoState(req.body ?? {}, current);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
     const meetingId =
       req.body.meetingId !== undefined
         ? req.body.meetingId || null
         : current.meeting_id;
-    const doneChanged = Boolean(current.done) !== done;
-    const completedAt = done
+    const doneChanged = Boolean(current.done) !== normalized.done;
+    const completedAt = normalized.done
       ? doneChanged || !current.completed_at
         ? new Date()
         : current.completed_at
       : null;
     const result = await db.query(
       `UPDATE directorio_todos
-       SET title = $1, assignee = $2, done = $3, meeting_id = $4, completed_at = $5
-       WHERE id = $6
+       SET title = $1, assignee = $2, done = $3, status = $4, blocked_reason = $5,
+           meeting_id = $6, completed_at = $7
+       WHERE id = $8
        RETURNING *`,
-      [title, assignee, done, meetingId, completedAt, req.params.id],
+      [
+        title,
+        assignee,
+        normalized.done,
+        normalized.status,
+        normalized.blockedReason,
+        meetingId,
+        completedAt,
+        req.params.id,
+      ],
     );
     res.json(mapTodo(result.rows[0]));
   } catch (error) {
