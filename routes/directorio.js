@@ -84,6 +84,7 @@ function mapTodo(row) {
     done,
     status,
     blockedReason: row.blocked_reason || undefined,
+    note: row.note || undefined,
     meetingId: row.meeting_id || undefined,
     position: Number(row.position ?? 0),
     createdAt: new Date(row.created_at).toISOString(),
@@ -254,9 +255,11 @@ router.post('/todos', async (req, res) => {
        WHERE done = FALSE`,
     );
     const position = Number(posResult.rows[0]?.next_position ?? 0);
+    const note =
+      req.body.note != null ? String(req.body.note).trim() || null : null;
     const result = await db.query(
-      `INSERT INTO directorio_todos (id, title, assignee, done, status, blocked_reason, meeting_id, position, completed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `INSERT INTO directorio_todos (id, title, assignee, done, status, blocked_reason, note, meeting_id, position, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *`,
       [
         id,
@@ -265,6 +268,7 @@ router.post('/todos', async (req, res) => {
         normalized.done,
         normalized.status,
         normalized.blockedReason,
+        note,
         meetingId || null,
         position,
         normalized.done ? new Date() : null,
@@ -344,11 +348,15 @@ router.put('/todos/:id', async (req, res) => {
         ? new Date()
         : current.completed_at
       : null;
+    const note =
+      req.body.note !== undefined
+        ? String(req.body.note).trim() || null
+        : current.note ?? null;
     const result = await db.query(
       `UPDATE directorio_todos
        SET title = $1, assignee = $2, done = $3, status = $4, blocked_reason = $5,
-           meeting_id = $6, completed_at = $7
-       WHERE id = $8
+           note = $6, meeting_id = $7, completed_at = $8
+       WHERE id = $9
        RETURNING *`,
       [
         title,
@@ -356,6 +364,7 @@ router.put('/todos/:id', async (req, res) => {
         normalized.done,
         normalized.status,
         normalized.blockedReason,
+        note,
         meetingId,
         completedAt,
         req.params.id,

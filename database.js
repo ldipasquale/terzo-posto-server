@@ -329,6 +329,7 @@ const CREATE_TABLES = `
     done BOOLEAN NOT NULL DEFAULT FALSE,
     status TEXT NOT NULL DEFAULT 'pending',
     blocked_reason TEXT,
+    note TEXT,
     meeting_id TEXT REFERENCES directorio_meetings(id) ON DELETE SET NULL,
     position INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1011,6 +1012,9 @@ async function initDb() {
     `);
     await client.query(`
       ALTER TABLE directorio_todos ADD COLUMN IF NOT EXISTS blocked_reason TEXT
+    `);
+    await client.query(`
+      ALTER TABLE directorio_todos ADD COLUMN IF NOT EXISTS note TEXT
     `);
     await client.query(`
       UPDATE directorio_todos
