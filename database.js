@@ -1059,6 +1059,17 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_event_ticket_types_rental_id
       ON event_ticket_types (rental_id)
     `);
+    // Before ticketera, has_tickets meant door sales ("a cargo de ellos").
+    // Keep ticketera only for events that already have configured ticket types.
+    await client.query(`
+      UPDATE agenda_rentals r
+      SET has_tickets = 0,
+          has_entradas = 1
+      WHERE r.has_tickets = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM event_ticket_types t WHERE t.rental_id = r.id
+        )
+    `);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_event_tickets_rental_id
       ON event_tickets (rental_id)
