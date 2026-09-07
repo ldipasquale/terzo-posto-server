@@ -15,6 +15,7 @@ import cupsRoutes from './routes/cups.js';
 import promotionsRoutes from './routes/promotions.js';
 import usersRoutes from './routes/users.js';
 import directorioRoutes from './routes/directorio.js';
+import publicTicketsRoutes from './routes/publicTickets.js';
 import { authenticateToken } from './middleware/auth.js';
 import {
   requireAnyPermission,
@@ -35,6 +36,7 @@ app.get('/health', (req, res) => {
 
 // Public routes
 app.use('/api/auth', authRoutes);
+app.use('/api/public', publicTicketsRoutes);
 
 // Protected routes
 app.use('/api/users', authenticateToken, usersRoutes);

@@ -22,6 +22,11 @@ The server will start on `http://localhost:3001` by default.
 ### Authentication
 - `POST /api/auth/login` - Login with email and password
 
+### Public tickets (no auth)
+- `GET /api/public/events/:slug` - Catálogo público de un evento con entradas (incluye `venue`)
+- `POST /api/public/events/:slug/tickets` - Compra (`multipart/form-data`: `ticket_type_id`, `quantity`, `buyer_name`, `buyer_phone`, `buyer_email`, `receipt`)
+- `GET /api/public/receipts/:fileId` - Imagen del comprobante
+
 ### Orders
 - `GET /api/orders` - Get all orders
 - `GET /api/orders/:id` - Get order by ID
@@ -53,6 +58,8 @@ The server will start on `http://localhost:3001` by default.
 - `PUT /api/directorio/manual-metrics` - Upsert de métricas semanales (array)
 
 ### Settings
+- `GET /api/settings/venue` - Ubicación del club (ticketera)
+- `PUT /api/settings/venue` - Actualizar ubicación (`name`, `address`, `city`, `lat`, `lng`)
 - `GET /api/settings/mercado-pago` - Get all Mercado Pago accounts
 - `POST /api/settings/mercado-pago` - Create Mercado Pago account
 - `PUT /api/settings/mercado-pago/:id` - Update Mercado Pago account
@@ -60,7 +67,7 @@ The server will start on `http://localhost:3001` by default.
 
 ## Authentication
 
-All endpoints except `/api/auth/login` require authentication via JWT token in the Authorization header:
+All endpoints except `/api/auth/login`, `/health` and `/api/public/*` require authentication via JWT token in the Authorization header:
 ```
 Authorization: Bearer <token>
 ```
@@ -76,6 +83,9 @@ The application uses PostgreSQL for data persistence. Set `DATABASE_URL` to your
 - `JWT_SECRET` - Secret key for JWT tokens (default: 'terzo-posto-secret-key-change-in-production')
 - `OPENAI_API_KEY` - OpenAI API key for receipt parsing (`POST /api/purchases/parse-ticket`). If unset, that endpoint returns 503.
 - `OPENAI_VISION_MODEL` - Optional chat model with vision (default: `gpt-4o-mini`)
+- `TICKET_RECEIPTS_DIR` - Directory for ticket purchase receipts (default: `/data/ticket-receipts` if `/data` exists, else `./ticket-receipts`)
+- `RESEND_API_KEY` - Resend API key for sending ticket emails. If unset, purchases still succeed and the email is skipped.
+- `RESEND_FROM` - From address (default: `Terzo Posto <entradas@terzoposto.club>`). Domain must be verified in Resend.
 
 ## Default Credentials
 

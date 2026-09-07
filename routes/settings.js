@@ -12,8 +12,29 @@ import {
   getDefaultOpeningChecklistTemplate,
   normalizeOpeningChecklistTemplate,
 } from '../lib/openingChecklist.js';
-
+import {
+  VENUE_LOCATION_SETTINGS_KEY,
+  getVenueLocation,
+  normalizeVenueLocation,
+} from '../lib/venueLocation.js';
 const router = express.Router();
+
+function emptyToNullText(value) {
+  const text = String(value ?? '').trim();
+  return text || null;
+}
+
+function mapMpAccount(account) {
+  const holder = account.holder || '';
+  return {
+    id: account.id,
+    holder,
+    alias: account.alias,
+    fullName: account.full_name || holder,
+    isDefault: Boolean(account.is_default),
+    active: Boolean(account.active),
+  };
+}
 
 const discountPresetSelect = `
   SELECT
@@ -129,6 +150,36 @@ function validateDiscountPresetBody(body, { partial = false } = {}) {
     },
   };
 }
+
+/** Lugar del club (ticketera pública) */
+router.get('/venue', async (_req, res) => {
+  try {
+    const venue = await getVenueLocation(db);
+    res.json(venue);
+  } catch (error) {
+    console.error('Error fetching venue location:', error);
+    res.status(500).json({ error: 'Error al obtener la ubicación' });
+  }
+});
+
+router.put('/venue', async (req, res) => {
+  try {
+    const normalized = normalizeVenueLocation(req.body);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    await db.query(
+      `INSERT INTO settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
+      [VENUE_LOCATION_SETTINGS_KEY, JSON.stringify(normalized.data)],
+    );
+    res.json(normalized.data);
+  } catch (error) {
+    console.error('Error updating venue location:', error);
+    res.status(500).json({ error: 'Error al guardar la ubicación' });
+  }
+});
 
 /** Buffet: precio depósito vasos retornables (ARS) */
 router.get('/buffet', async (_req, res) => {
@@ -381,21 +432,13 @@ router.put('/opening-checklist', requireAdminMiddleware, async (req, res) => {
 router.get('/mercado-pago', async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT id, holder, alias, is_default, active
+      SELECT id, holder, full_name, alias, is_default, active
       FROM mercado_pago_accounts
       WHERE id != 'efectivo' AND COALESCE(kind, 'mercadopago') = 'mercadopago'
       ORDER BY is_default DESC, created_at ASC
     `);
 
-    const formattedAccounts = result.rows.map((account) => ({
-      id: account.id,
-      holder: account.holder,
-      alias: account.alias,
-      isDefault: Boolean(account.is_default),
-      active: Boolean(account.active),
-    }));
-
-    res.json(formattedAccounts);
+    res.json(result.rows.map(mapMpAccount));
   } catch (error) {
     console.error('Error fetching Mercado Pago accounts:', error);
     res.status(500).json({ error: 'Error al obtener las cuentas de Mercado Pago' });
@@ -405,7 +448,7 @@ router.get('/mercado-pago', async (req, res) => {
 // Create Mercado Pago account
 router.post('/mercado-pago', async (req, res) => {
   try {
-    const { holder, alias, isDefault, active } = req.body;
+    const { holder, alias, fullName, isDefault, active } = req.body;
 
     if (!holder || !alias) {
       return res.status(400).json({ error: 'Titular y alias son requeridos' });
@@ -423,27 +466,20 @@ router.post('/mercado-pago', async (req, res) => {
     const accountId = Date.now().toString();
     const accountCount = await db.query('SELECT COUNT(*)::int AS count FROM mercado_pago_accounts');
     const shouldBeDefault = isDefault || accountCount.rows[0].count === 0;
+    const resolvedFullName = emptyToNullText(fullName) || String(holder).trim();
 
     await db.query(
-      `INSERT INTO mercado_pago_accounts (id, holder, alias, is_default, active, kind)
-       VALUES ($1, $2, $3, $4, $5, 'mercadopago')`,
-      [accountId, holder, alias, shouldBeDefault ? 1 : 0, active !== false ? 1 : 0]
+      `INSERT INTO mercado_pago_accounts (id, holder, full_name, alias, is_default, active, kind)
+       VALUES ($1, $2, $3, $4, $5, $6, 'mercadopago')`,
+      [accountId, holder, resolvedFullName, alias, shouldBeDefault ? 1 : 0, active !== false ? 1 : 0]
     );
 
     const result = await db.query(
-      `SELECT id, holder, alias, is_default, active
+      `SELECT id, holder, full_name, alias, is_default, active
        FROM mercado_pago_accounts WHERE id = $1`,
       [accountId]
     );
-    const account = result.rows[0];
-
-    res.status(201).json({
-      id: account.id,
-      holder: account.holder,
-      alias: account.alias,
-      isDefault: Boolean(account.is_default),
-      active: Boolean(account.active),
-    });
+    res.status(201).json(mapMpAccount(result.rows[0]));
   } catch (error) {
     console.error('Error creating Mercado Pago account:', error);
     res.status(500).json({ error: 'Error al crear la cuenta de Mercado Pago' });
@@ -456,7 +492,7 @@ router.put('/mercado-pago/:id', async (req, res) => {
     if (req.params.id === 'efectivo') {
       return res.status(400).json({ error: 'No se puede editar la cuenta de efectivo' });
     }
-    const { holder, alias, isDefault, active } = req.body;
+    const { holder, alias, fullName, isDefault, active } = req.body;
 
     if (isDefault) {
       await db.query('UPDATE mercado_pago_accounts SET is_default = 0 WHERE id != $1', [
@@ -464,11 +500,14 @@ router.put('/mercado-pago/:id', async (req, res) => {
       ]);
     }
 
+    const resolvedFullName =
+      emptyToNullText(fullName) || String(holder || '').trim() || null;
+
     const result = await db.query(
       `UPDATE mercado_pago_accounts
-       SET holder = $1, alias = $2, is_default = $3, active = $4
-       WHERE id = $5`,
-      [holder, alias, isDefault ? 1 : 0, active !== false ? 1 : 0, req.params.id]
+       SET holder = $1, full_name = $2, alias = $3, is_default = $4, active = $5
+       WHERE id = $6`,
+      [holder, resolvedFullName, alias, isDefault ? 1 : 0, active !== false ? 1 : 0, req.params.id]
     );
 
     if (result.rowCount === 0) {
@@ -476,19 +515,11 @@ router.put('/mercado-pago/:id', async (req, res) => {
     }
 
     const accountResult = await db.query(
-      `SELECT id, holder, alias, is_default, active
+      `SELECT id, holder, full_name, alias, is_default, active
        FROM mercado_pago_accounts WHERE id = $1`,
       [req.params.id]
     );
-    const account = accountResult.rows[0];
-
-    res.json({
-      id: account.id,
-      holder: account.holder,
-      alias: account.alias,
-      isDefault: Boolean(account.is_default),
-      active: Boolean(account.active),
-    });
+    res.json(mapMpAccount(accountResult.rows[0]));
   } catch (error) {
     console.error('Error updating Mercado Pago account:', error);
     res.status(500).json({ error: 'Error al actualizar la cuenta de Mercado Pago' });

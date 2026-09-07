@@ -1,5 +1,6 @@
 import pg from 'pg';
 import bcrypt from 'bcryptjs';
+import { ensureRentalSlug } from './lib/eventTickets.js';
 
 const { Pool } = pg;
 
@@ -34,6 +35,7 @@ const CREATE_TABLES = `
   CREATE TABLE IF NOT EXISTS mercado_pago_accounts (
     id TEXT PRIMARY KEY,
     holder TEXT NOT NULL,
+    full_name TEXT,
     alias TEXT NOT NULL,
     is_default SMALLINT NOT NULL DEFAULT 0,
     active SMALLINT NOT NULL DEFAULT 1,
@@ -207,7 +209,10 @@ const CREATE_TABLES = `
     fixed_price DOUBLE PRECISION,
     consumption_credit DOUBLE PRECISION,
     has_tickets SMALLINT,
+    has_entradas SMALLINT,
     ticket_price DOUBLE PRECISION,
+    slug TEXT,
+    flyer_file TEXT,
     revenue_share_percent DOUBLE PRECISION,
     room_insurance_price DOUBLE PRECISION,
     date_slots JSONB,
@@ -216,6 +221,9 @@ const CREATE_TABLES = `
     staff_drinks TEXT,
     event_timeline TEXT,
     technical_needs TEXT,
+    transfer_alias TEXT,
+    transfer_holder TEXT,
+    event_description TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -230,6 +238,33 @@ const CREATE_TABLES = `
     description TEXT,
     payment_type TEXT CHECK (payment_type IN ('rental', 'tickets')),
     paid_date TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS event_ticket_types (
+    id TEXT PRIMARY KEY,
+    rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    price DOUBLE PRECISION NOT NULL,
+    available_quantity INTEGER NOT NULL CHECK (available_quantity >= 0),
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS event_tickets (
+    id TEXT PRIMARY KEY,
+    rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+    ticket_type_id TEXT NOT NULL REFERENCES event_ticket_types(id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    unit_price DOUBLE PRECISION NOT NULL,
+    buyer_name TEXT NOT NULL,
+    buyer_phone TEXT NOT NULL,
+    buyer_email TEXT,
+    receipt_file TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending', 'approved', 'rejected')),
+    checked_in_at TIMESTAMP,
+    purchase_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -508,6 +543,16 @@ async function initDb() {
             CHECK (kind IN ('cash', 'mercadopago'));
         EXCEPTION WHEN duplicate_object THEN NULL; END $$
       `);
+    }
+    if (!mpColNames.includes('full_name')) {
+      await client.query(
+        'ALTER TABLE mercado_pago_accounts ADD COLUMN IF NOT EXISTS full_name TEXT',
+      );
+      await client.query(
+        `UPDATE mercado_pago_accounts
+         SET full_name = holder
+         WHERE full_name IS NULL OR btrim(full_name) = ''`,
+      );
     }
 
     await client.query(`
@@ -922,6 +967,102 @@ async function initDb() {
     await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS technical_needs TEXT;
     `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS slug TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS flyer_file TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS transfer_alias TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS transfer_holder TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS event_description TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS has_entradas SMALLINT;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS buyer_email TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMP;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS payment_method TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS mercado_pago_account_id TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS discount_amount DOUBLE PRECISION NOT NULL DEFAULT 0;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'online';
+    `);
+    await client.query(`
+      ALTER TABLE agenda_payments DROP CONSTRAINT IF EXISTS agenda_payments_payment_type_check;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_payments ADD CONSTRAINT agenda_payments_payment_type_check
+      CHECK (payment_type IN ('rental', 'tickets', 'ticket_sales'));
+    `);
+    await client.query(`
+      UPDATE agenda_rentals
+      SET has_entradas = 1
+      WHERE has_entradas IS NULL
+        AND (has_tickets = 1 OR ticket_price IS NOT NULL AND ticket_price > 0)
+    `);
+    await client.query(`
+      UPDATE agenda_rentals
+      SET has_entradas = 0
+      WHERE has_entradas IS NULL
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agenda_rentals_slug
+      ON agenda_rentals (slug)
+      WHERE slug IS NOT NULL
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS event_ticket_types (
+        id TEXT PRIMARY KEY,
+        rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        price DOUBLE PRECISION NOT NULL,
+        available_quantity INTEGER NOT NULL CHECK (available_quantity >= 0),
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS event_tickets (
+        id TEXT PRIMARY KEY,
+        rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+        ticket_type_id TEXT NOT NULL REFERENCES event_ticket_types(id),
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        unit_price DOUBLE PRECISION NOT NULL,
+        buyer_name TEXT NOT NULL,
+        buyer_phone TEXT NOT NULL,
+        buyer_email TEXT,
+        receipt_file TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'approved', 'rejected')),
+        checked_in_at TIMESTAMP,
+        purchase_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_event_ticket_types_rental_id
+      ON event_ticket_types (rental_id)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_event_tickets_rental_id
+      ON event_tickets (rental_id)
+    `);
 
     await client.query(`
       ALTER TABLE discount_presets DROP CONSTRAINT IF EXISTS discount_presets_percent_check;
@@ -1198,6 +1339,14 @@ async function initDb() {
           row,
         );
       }
+    }
+
+    const missingSlugs = await client.query(
+      `SELECT * FROM agenda_rentals
+       WHERE has_tickets = 1 AND slug IS NULL`,
+    );
+    for (const rental of missingSlugs.rows) {
+      await ensureRentalSlug(client, rental);
     }
   } finally {
     client.release();
