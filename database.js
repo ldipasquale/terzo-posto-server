@@ -591,6 +591,11 @@ async function initDb() {
         "ALTER TABLE app_users ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '[]'::jsonb",
       );
     }
+    if (!appUsersColNames.includes('photo_file')) {
+      await client.query(
+        'ALTER TABLE app_users ADD COLUMN IF NOT EXISTS photo_file TEXT',
+      );
+    }
 
     const findMpAccountByHolder = async (holderCandidates) => {
       for (const holder of holderCandidates) {

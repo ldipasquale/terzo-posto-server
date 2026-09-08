@@ -16,6 +16,7 @@ import {
   phoneDigits,
   receiptExtension,
   receiptsDir,
+  userPhotosDir,
 } from '../lib/eventTickets.js';
 import {
   isValidEmail,
@@ -271,6 +272,18 @@ router.get('/flyers/:fileId', (req, res) => {
   const filePath = path.join(flyersDir(), fileId);
   if (!fs.existsSync(filePath)) {
     return res.status(404).json({ error: 'Flyer no encontrado' });
+  }
+  res.sendFile(filePath);
+});
+
+router.get('/user-photos/:fileId', (req, res) => {
+  const fileId = req.params.fileId;
+  if (!isReceiptFileName(fileId)) {
+    return res.status(404).json({ error: 'Foto no encontrada' });
+  }
+  const filePath = path.join(userPhotosDir(), fileId);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Foto no encontrada' });
   }
   res.sendFile(filePath);
 });

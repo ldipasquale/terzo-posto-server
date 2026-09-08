@@ -3,6 +3,7 @@ node_modules/
 *.log
 ticket-receipts/
 event-flyers/
+user-photos/
 .github/
 backups/
 BACKUP.md

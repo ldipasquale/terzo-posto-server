@@ -1,13 +1,39 @@
 import express from 'express';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import multer from 'multer';
 import bcrypt from 'bcryptjs';
 import db from '../database.js';
 import { ALL_PERMISSIONS, parsePermissionsJson } from '../lib/userPermissions.js';
 import { requireAdminMiddleware } from '../middleware/requirePermission.js';
+import {
+  ensureUserPhotosDir,
+  isReceiptFileName,
+  newId,
+  receiptExtension,
+  userPhotosDir,
+} from '../lib/eventTickets.js';
 
 const router = express.Router();
 
-function formatUser(row) {
+const USER_COLUMNS = `id, name, email, active, is_admin, permissions,
+              default_mercado_pago_account_id, photo_file, created_at, updated_at`;
+
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 6 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype);
+    if (!ok) {
+      cb(new Error('Solo se permiten imágenes JPEG, PNG o WebP'));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
+export function formatUser(row) {
   return {
     id: row.id,
     name: row.name,
@@ -16,9 +42,18 @@ function formatUser(row) {
     isAdmin: Boolean(row.is_admin),
     permissions: parsePermissionsJson(row.permissions),
     defaultMercadoPagoAccountId: row.default_mercado_pago_account_id || undefined,
+    photoUrl: row.photo_file
+      ? `/api/public/user-photos/${row.photo_file}`
+      : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function removeUserPhotoFile(fileName) {
+  if (!fileName || !isReceiptFileName(fileName)) return;
+  const filePath = path.join(userPhotosDir(), fileName);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 }
 
 function normalizePermissions(permissions) {
@@ -43,8 +78,7 @@ router.use(requireAdminMiddleware);
 router.get('/', async (_req, res) => {
   try {
     const result = await db.query(
-      `SELECT id, name, email, active, is_admin, permissions,
-              default_mercado_pago_account_id, created_at, updated_at
+      `SELECT ${USER_COLUMNS}
        FROM app_users
        ORDER BY name ASC, email ASC`,
     );
@@ -105,8 +139,7 @@ router.post('/', async (req, res) => {
     );
 
     const created = await db.query(
-      `SELECT id, name, email, active, is_admin, permissions,
-              default_mercado_pago_account_id, created_at, updated_at
+      `SELECT ${USER_COLUMNS}
        FROM app_users WHERE id = $1`,
       [id],
     );
@@ -123,8 +156,7 @@ router.put('/:id', async (req, res) => {
     const { name, email, password, active, isAdmin, permissions } = req.body;
 
     const existing = await db.query(
-      `SELECT id, name, email, active, is_admin, permissions,
-              default_mercado_pago_account_id, created_at, updated_at
+      `SELECT ${USER_COLUMNS}
        FROM app_users WHERE id = $1`,
       [id],
     );
@@ -218,8 +250,7 @@ router.put('/:id', async (req, res) => {
     }
 
     const updated = await db.query(
-      `SELECT id, name, email, active, is_admin, permissions,
-              default_mercado_pago_account_id, created_at, updated_at
+      `SELECT ${USER_COLUMNS}
        FROM app_users WHERE id = $1`,
       [id],
     );
@@ -239,17 +270,85 @@ router.delete('/:id', async (req, res) => {
     }
 
     const result = await db.query(
-      'DELETE FROM app_users WHERE id = $1 RETURNING id',
+      'DELETE FROM app_users WHERE id = $1 RETURNING id, photo_file',
       [id],
     );
     if (!result.rows[0]) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
+    removeUserPhotoFile(result.rows[0].photo_file);
 
     res.status(204).send();
   } catch (error) {
     console.error('Error deleting user:', error);
     res.status(500).json({ error: 'Error al eliminar usuario' });
+  }
+});
+
+router.post('/:id/photo', (req, res) => {
+  photoUpload.single('photo')(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message || 'Foto inválida' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'Subí una imagen' });
+    }
+    try {
+      const { id } = req.params;
+      const current = await db.query(
+        `SELECT ${USER_COLUMNS} FROM app_users WHERE id = $1`,
+        [id],
+      );
+      if (!current.rows[0]) {
+        return res.status(404).json({ error: 'Usuario no encontrado' });
+      }
+      const dir = ensureUserPhotosDir();
+      const photoFile = `${newId()}.${receiptExtension(req.file.mimetype)}`;
+      fs.writeFileSync(path.join(dir, photoFile), req.file.buffer);
+      await db.query(
+        `UPDATE app_users
+         SET photo_file = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [photoFile, id],
+      );
+      removeUserPhotoFile(current.rows[0].photo_file);
+      const updated = await db.query(
+        `SELECT ${USER_COLUMNS} FROM app_users WHERE id = $1`,
+        [id],
+      );
+      res.json(formatUser(updated.rows[0]));
+    } catch (error) {
+      console.error('Error uploading user photo:', error);
+      res.status(500).json({ error: 'Error al subir la foto' });
+    }
+  });
+});
+
+router.delete('/:id/photo', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const current = await db.query(
+      `SELECT ${USER_COLUMNS} FROM app_users WHERE id = $1`,
+      [id],
+    );
+    if (!current.rows[0]) {
+      return res.status(404).json({ error: 'Usuario no encontrado' });
+    }
+    await db.query(
+      `UPDATE app_users
+       SET photo_file = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [id],
+    );
+    removeUserPhotoFile(current.rows[0].photo_file);
+    const updated = await db.query(
+      `SELECT ${USER_COLUMNS} FROM app_users WHERE id = $1`,
+      [id],
+    );
+    res.json(formatUser(updated.rows[0]));
+  } catch (error) {
+    console.error('Error deleting user photo:', error);
+    res.status(500).json({ error: 'Error al quitar la foto' });
   }
 });
 
