@@ -693,6 +693,109 @@ router.delete('/payments/:id', async (req, res) => {
   }
 });
 
+router.get('/ticket-alerts', async (_req, res) => {
+  try {
+    const pendingResult = await db.query(
+      `SELECT
+         r.id AS rental_id,
+         r.activity_name,
+         r.date,
+         r.start_time,
+         r.end_time,
+         COUNT(*)::int AS count,
+         COALESCE(SUM(t.quantity), 0)::int AS quantity
+       FROM event_tickets t
+       JOIN agenda_rentals r ON r.id = t.rental_id
+       WHERE t.status = 'pending'
+       GROUP BY r.id, r.activity_name, r.date, r.start_time, r.end_time
+       ORDER BY r.date ASC NULLS LAST, r.activity_name ASC`,
+    );
+
+    const approvedResult = await db.query(
+      `SELECT rental_id, quantity, unit_price, discount_amount, payment_method
+       FROM event_tickets
+       WHERE status = 'approved'`,
+    );
+    const closedResult = await db.query(
+      `SELECT rental_id, payment_method, amount
+       FROM agenda_payments
+       WHERE payment_type = 'ticket_sales'`,
+    );
+    const rentalIds = [
+      ...new Set(approvedResult.rows.map((row) => row.rental_id)),
+    ];
+    const rentalsResult =
+      rentalIds.length === 0
+        ? { rows: [] }
+        : await db.query(
+            `SELECT id, activity_name, date, start_time, end_time
+             FROM agenda_rentals
+             WHERE id = ANY($1::text[])`,
+            [rentalIds],
+          );
+
+    const closedByRental = new Map();
+    for (const row of closedResult.rows) {
+      const current = closedByRental.get(row.rental_id) || { cash: 0, mp: 0 };
+      const amount = Number(row.amount) || 0;
+      if (row.payment_method === 'efectivo') current.cash += amount;
+      if (row.payment_method === 'mercadopago') current.mp += amount;
+      closedByRental.set(row.rental_id, current);
+    }
+
+    const ticketsByRental = new Map();
+    for (const row of approvedResult.rows) {
+      const list = ticketsByRental.get(row.rental_id) || [];
+      list.push(row);
+      ticketsByRental.set(row.rental_id, list);
+    }
+
+    const unclosedTicketSales = [];
+    for (const rental of rentalsResult.rows) {
+      const tickets = ticketsByRental.get(rental.id) || [];
+      if (tickets.length === 0) continue;
+      let cash = 0;
+      let mp = 0;
+      for (const row of tickets) {
+        const amount = ticketNetAmount(row);
+        if (row.payment_method === 'efectivo') cash += amount;
+        else mp += amount;
+      }
+      cash = Math.round(cash);
+      mp = Math.round(mp);
+      const closed = closedByRental.get(rental.id) || { cash: 0, mp: 0 };
+      const pendingCash = Math.max(0, cash - Math.round(closed.cash));
+      const pendingMp = Math.max(0, mp - Math.round(closed.mp));
+      if (pendingCash <= 0 && pendingMp <= 0) continue;
+      unclosedTicketSales.push({
+        rentalId: rental.id,
+        eventName: rental.activity_name,
+        eventDate: sqlDateToYmd(rental.date) || null,
+        startTime: rental.start_time || null,
+        endTime: rental.end_time || null,
+        pendingCash,
+        pendingMp,
+      });
+    }
+
+    res.json({
+      pendingTickets: pendingResult.rows.map((row) => ({
+        rentalId: row.rental_id,
+        eventName: row.activity_name,
+        eventDate: sqlDateToYmd(row.date) || null,
+        startTime: row.start_time || null,
+        endTime: row.end_time || null,
+        count: Number(row.count) || 0,
+        quantity: Number(row.quantity) || 0,
+      })),
+      unclosedTicketSales,
+    });
+  } catch (error) {
+    console.error('Error fetching ticket alerts:', error);
+    res.status(500).json({ error: 'Error al obtener alertas de entradas' });
+  }
+});
+
 router.get('/ticket-catalogs', async (_req, res) => {
   try {
     const rentals = await db.query(
