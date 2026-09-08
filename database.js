@@ -289,6 +289,7 @@ const CREATE_TABLES = `
     amount DOUBLE PRECISION NOT NULL,
     due_day INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
     notes TEXT,
+    responsible_name TEXT,
     active SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1098,6 +1099,10 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE finance_transactions ADD COLUMN IF NOT EXISTS area TEXT;
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses ADD COLUMN IF NOT EXISTS responsible_name TEXT;
     `);
 
     await client.query(`

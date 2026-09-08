@@ -9,6 +9,15 @@ import {
 
 const router = express.Router();
 
+const PARTNERS = ['Lucho', 'Bachi', 'Luli'];
+
+function parseResponsibleName(value) {
+  if (value == null) return null;
+  const name = String(value).trim();
+  if (!name) return '';
+  return PARTNERS.includes(name) ? name : undefined;
+}
+
 function mapLiquidityAccount(row) {
   const isCash = row.kind === 'cash' || row.id === 'efectivo';
   return {
@@ -40,6 +49,7 @@ const mapFixedExpense = (row) => ({
   amount: Number(row.amount),
   dueDay: Number(row.due_day),
   notes: row.notes || undefined,
+  responsibleName: row.responsible_name || undefined,
   active: Boolean(row.active),
   createdAt: new Date(row.created_at).toISOString(),
 });
@@ -371,11 +381,16 @@ router.post('/fixed-expenses', async (req, res) => {
     if (!e?.name || Number(e.amount) <= 0 || Number(e.dueDay) < 1 || Number(e.dueDay) > 31) {
       return res.status(400).json({ error: 'Datos inválidos de gasto fijo' });
     }
+    const responsibleParsed = parseResponsibleName(e.responsibleName);
+    if (responsibleParsed === undefined) {
+      return res.status(400).json({ error: 'Responsable inválido' });
+    }
+    const responsibleName = responsibleParsed || null;
     const id = crypto.randomUUID();
     await db.query(
-      `INSERT INTO finance_fixed_expenses (id, name, amount, due_day, notes, active)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [id, String(e.name).trim(), Number(e.amount), Number(e.dueDay), e.notes ?? null, e.active === false ? 0 : 1],
+      `INSERT INTO finance_fixed_expenses (id, name, amount, due_day, notes, responsible_name, active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [id, String(e.name).trim(), Number(e.amount), Number(e.dueDay), e.notes ?? null, responsibleName, e.active === false ? 0 : 1],
     );
     const created = await db.query('SELECT * FROM finance_fixed_expenses WHERE id = $1', [id]);
     res.status(201).json(mapFixedExpense(created.rows[0]));
@@ -388,20 +403,33 @@ router.post('/fixed-expenses', async (req, res) => {
 router.put('/fixed-expenses/:id', async (req, res) => {
   try {
     const e = req.body;
+    let responsibleNameArg = null;
+    if (e.responsibleName !== undefined) {
+      const parsed = parseResponsibleName(e.responsibleName);
+      if (parsed === undefined) {
+        return res.status(400).json({ error: 'Responsable inválido' });
+      }
+      responsibleNameArg = parsed;
+    }
     const result = await db.query(
       `UPDATE finance_fixed_expenses SET
          name = COALESCE($1, name),
          amount = COALESCE($2, amount),
          due_day = COALESCE($3, due_day),
          notes = COALESCE($4, notes),
-         active = COALESCE($5, active),
+         responsible_name = CASE
+           WHEN $5::text IS NULL THEN responsible_name
+           ELSE NULLIF(BTRIM($5), '')
+         END,
+         active = COALESCE($6, active),
          updated_at = CURRENT_TIMESTAMP
-       WHERE id = $6`,
+       WHERE id = $7`,
       [
         e.name ?? null,
         e.amount ?? null,
         e.dueDay ?? null,
         e.notes ?? null,
+        responsibleNameArg,
         e.active == null ? null : e.active ? 1 : 0,
         req.params.id,
       ],
