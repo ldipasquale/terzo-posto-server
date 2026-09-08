@@ -150,9 +150,6 @@ router.post('/events/:slug/tickets', (req, res) => {
       if (!Number.isInteger(quantity) || quantity < 1) {
         return res.status(400).json({ error: 'Cantidad inválida' });
       }
-      if (!req.file) {
-        return res.status(400).json({ error: 'Subí el comprobante de transferencia' });
-      }
 
       await client.query('BEGIN');
       const rentalResult = await client.query(
@@ -183,6 +180,13 @@ router.post('/events/:slug/tickets', (req, res) => {
         return res.status(400).json({ error: 'Tipo de entrada no encontrado' });
       }
 
+      const unitPrice = Number(type.price);
+      const isFree = Number.isFinite(unitPrice) && unitPrice <= 0;
+      if (!isFree && !req.file) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Subí el comprobante de transferencia' });
+      }
+
       const soldResult = await client.query(
         `SELECT COALESCE(SUM(quantity), 0)::int AS sold
          FROM event_tickets
@@ -210,26 +214,30 @@ router.post('/events/:slug/tickets', (req, res) => {
         }
       }
 
-      const dir = ensureReceiptsDir();
-      const receiptFile = `${newId()}.${receiptExtension(req.file.mimetype)}`;
-      fs.writeFileSync(path.join(dir, receiptFile), req.file.buffer);
+      let receiptFile = null;
+      if (!isFree && req.file) {
+        const dir = ensureReceiptsDir();
+        receiptFile = `${newId()}.${receiptExtension(req.file.mimetype)}`;
+        fs.writeFileSync(path.join(dir, receiptFile), req.file.buffer);
+      }
 
       const ticketId = newId();
       await client.query(
         `INSERT INTO event_tickets (
           id, rental_id, ticket_type_id, quantity, unit_price,
           buyer_name, buyer_phone, buyer_email, receipt_file, status, purchase_date
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending', CURRENT_TIMESTAMP)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CURRENT_TIMESTAMP)`,
         [
           ticketId,
           rental.id,
           type.id,
           quantity,
-          Number(type.price),
+          unitPrice,
           buyerName,
           buyerPhone,
           buyerEmail,
           receiptFile,
+          isFree ? 'approved' : 'pending',
         ],
       );
       await client.query('COMMIT');

@@ -868,7 +868,10 @@ router.post('/rentals/:id/tickets', async (req, res) => {
     if (!Number.isInteger(quantity) || quantity < 1) {
       return res.status(400).json({ error: 'Cantidad inválida' });
     }
-    if (!['efectivo', 'mercadopago'].includes(paymentMethod)) {
+    if (
+      paymentMethod &&
+      !['efectivo', 'mercadopago'].includes(paymentMethod)
+    ) {
       return res.status(400).json({ error: 'Elegí el medio de pago' });
     }
     if (buyerEmail && !isValidEmail(buyerEmail)) {
@@ -912,8 +915,14 @@ router.post('/rentals/:id/tickets', async (req, res) => {
       return res.status(400).json({ error: 'El descuento no puede superar el total' });
     }
     const unitPrice = Number(type.price);
+    const isFree = Number.isFinite(unitPrice) && unitPrice <= 0;
+    if (!isFree && !['efectivo', 'mercadopago'].includes(paymentMethod)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Elegí el medio de pago' });
+    }
+    const storedPayment = isFree ? null : paymentMethod;
     const mpAccountId =
-      paymentMethod === 'mercadopago'
+      storedPayment === 'mercadopago'
         ? await resolveTicketTransferAccountId(client, rental)
         : null;
 
@@ -936,9 +945,9 @@ router.post('/rentals/:id/tickets', async (req, res) => {
         unitPrice,
         buyerName,
         buyerEmail,
-        paymentMethod,
+        storedPayment,
         mpAccountId,
-        discountAmount,
+        isFree ? 0 : discountAmount,
       ],
     );
     await client.query('COMMIT');

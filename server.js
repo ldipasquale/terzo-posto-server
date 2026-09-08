@@ -15,6 +15,7 @@ import cupsRoutes from './routes/cups.js';
 import promotionsRoutes from './routes/promotions.js';
 import usersRoutes from './routes/users.js';
 import directorioRoutes from './routes/directorio.js';
+import instagramRoutes from './routes/instagram.js';
 import publicTicketsRoutes from './routes/publicTickets.js';
 import { authenticateToken } from './middleware/auth.js';
 import {
@@ -102,6 +103,7 @@ app.use(
   promotionsRoutes,
 );
 app.use('/api/directorio', authenticateToken, directorioRoutes);
+app.use('/api/instagram', authenticateToken, instagramRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {
