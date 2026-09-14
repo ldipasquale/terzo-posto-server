@@ -7,7 +7,10 @@ import {
   getBuffetCloseSplitForCashRegister,
   splitAmountByFoodDrinkCups,
 } from "../lib/foodDrinkSplit.js";
-import { normalizeOpeningChecklistRecord } from "../lib/openingChecklist.js";
+import {
+  isOpeningChecklistComplete,
+  normalizeOpeningChecklistRecord,
+} from "../lib/openingChecklist.js";
 
 const router = express.Router();
 
@@ -173,6 +176,11 @@ async function insertBuffetCloseTransactions(
   }
 }
 
+function formatOpeningChecklist(raw) {
+  const normalized = normalizeOpeningChecklistRecord(raw ?? null);
+  return normalized.record ?? undefined;
+}
+
 function formatCashRegister(row) {
   return {
     id: row.id,
@@ -188,12 +196,7 @@ function formatCashRegister(row) {
     status: row.status,
     closedAt: row.closed_at ? new Date(row.closed_at).toISOString() : undefined,
     closingData: row.closing_data || undefined,
-    openingChecklist:
-      row.opening_checklist &&
-      typeof row.opening_checklist === "object" &&
-      Array.isArray(row.opening_checklist.items)
-        ? row.opening_checklist
-        : undefined,
+    openingChecklist: formatOpeningChecklist(row.opening_checklist),
     kitchenOpen: Boolean(Number(row.kitchen_open)),
     createdAt: new Date(row.created_at).toISOString(),
   };
@@ -326,6 +329,52 @@ router.post("/", async (req, res) => {
   } catch (error) {
     console.error("Error opening cash register:", error);
     res.status(500).json({ error: "Error al abrir la caja" });
+  }
+});
+
+// PATCH /api/cash-registers/:id/opening-checklist — completar checklist pendiente
+router.patch("/:id/opening-checklist", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const normalizedChecklist = normalizeOpeningChecklistRecord(req.body ?? null);
+    if (normalizedChecklist.error) {
+      return res.status(400).json({ error: normalizedChecklist.error });
+    }
+    if (!isOpeningChecklistComplete(normalizedChecklist.record)) {
+      return res.status(400).json({
+        error: "Hay que completar el checklist de apertura",
+      });
+    }
+
+    const check = await db.query(
+      "SELECT id, status, opening_checklist FROM cash_registers WHERE id = $1",
+      [id],
+    );
+    const caja = check.rows[0];
+    if (!caja) {
+      return res.status(404).json({ error: "Caja no encontrada" });
+    }
+    if (caja.status !== "open") {
+      return res.status(400).json({ error: "La caja no está abierta" });
+    }
+    if (isOpeningChecklistComplete(caja.opening_checklist)) {
+      return res.status(400).json({
+        error: "Esta caja ya tiene un checklist de apertura",
+      });
+    }
+
+    await db.query(
+      "UPDATE cash_registers SET opening_checklist = $1 WHERE id = $2",
+      [JSON.stringify(normalizedChecklist.record), id],
+    );
+
+    const result = await db.query("SELECT * FROM cash_registers WHERE id = $1", [
+      id,
+    ]);
+    res.json(formatCashRegister(result.rows[0]));
+  } catch (error) {
+    console.error("Error saving opening checklist:", error);
+    res.status(500).json({ error: "Error al guardar el checklist de apertura" });
   }
 });
 
