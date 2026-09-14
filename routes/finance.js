@@ -91,15 +91,19 @@ router.get('/invoices', async (_req, res) => {
 router.patch('/invoices', async (req, res) => {
   try {
     const sourceKey = String(req.body?.sourceKey || '').trim();
-    const invoiced = req.body?.invoiced;
-    if (!sourceKey || typeof invoiced !== 'boolean') {
+    const patch = {};
+    if (typeof req.body?.invoiced === 'boolean') patch.invoiced = req.body.invoiced;
+    if (typeof req.body?.archived === 'boolean') patch.archived = req.body.archived;
+    if (!sourceKey || (patch.invoiced == null && patch.archived == null)) {
       return res.status(400).json({ error: 'Datos inválidos' });
     }
-    const updated = await setInvoiceMark(db, sourceKey, invoiced);
+    const updated = await setInvoiceMark(db, sourceKey, patch);
     res.json(updated);
   } catch (error) {
     console.error('Error updating invoice mark:', error);
-    res.status(500).json({ error: 'Error al actualizar la factura' });
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : 'Error al actualizar la factura',
+    });
   }
 });
 

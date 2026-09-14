@@ -307,7 +307,8 @@ const CREATE_TABLES = `
 
   CREATE TABLE IF NOT EXISTS finance_invoice_marks (
     source_key TEXT PRIMARY KEY,
-    invoiced SMALLINT NOT NULL DEFAULT 1,
+    invoiced SMALLINT NOT NULL DEFAULT 0,
+    archived SMALLINT NOT NULL DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -1109,6 +1110,10 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE finance_fixed_expenses ADD COLUMN IF NOT EXISTS responsible_name TEXT;
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS archived SMALLINT NOT NULL DEFAULT 0;
     `);
 
     await client.query(`
