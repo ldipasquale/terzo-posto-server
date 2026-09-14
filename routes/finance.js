@@ -6,6 +6,7 @@ import {
   canLinkEventToArea,
   isValidAreaCategory,
 } from '../lib/financeAreas.js';
+import { listInvoiceItems, setInvoiceMark } from '../lib/financeInvoices.js';
 
 const router = express.Router();
 
@@ -74,6 +75,31 @@ router.get('/accounts', async (_req, res) => {
   } catch (error) {
     console.error('Error fetching finance accounts:', error);
     res.status(500).json({ error: 'Error al obtener cuentas' });
+  }
+});
+
+router.get('/invoices', async (_req, res) => {
+  try {
+    const items = await listInvoiceItems(db);
+    res.json(items);
+  } catch (error) {
+    console.error('Error fetching invoices:', error);
+    res.status(500).json({ error: 'Error al obtener facturas' });
+  }
+});
+
+router.patch('/invoices', async (req, res) => {
+  try {
+    const sourceKey = String(req.body?.sourceKey || '').trim();
+    const invoiced = req.body?.invoiced;
+    if (!sourceKey || typeof invoiced !== 'boolean') {
+      return res.status(400).json({ error: 'Datos inválidos' });
+    }
+    const updated = await setInvoiceMark(db, sourceKey, invoiced);
+    res.json(updated);
+  } catch (error) {
+    console.error('Error updating invoice mark:', error);
+    res.status(500).json({ error: 'Error al actualizar la factura' });
   }
 });
 

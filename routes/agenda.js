@@ -912,9 +912,17 @@ router.put('/rentals/:id/ticket-types', async (req, res) => {
       ]);
     }
 
+    if (incoming.length > 0) {
+      await client.query(
+        `UPDATE agenda_rentals
+         SET has_tickets = 1, has_entradas = 1
+         WHERE id = $1`,
+        [rentalId],
+      );
+    }
     await ensureRentalSlug(client, {
       ...rental,
-      has_tickets: rental.has_tickets ?? 1,
+      has_tickets: incoming.length > 0 ? 1 : rental.has_tickets,
     });
     await client.query('COMMIT');
 

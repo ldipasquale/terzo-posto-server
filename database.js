@@ -305,6 +305,12 @@ const CREATE_TABLES = `
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS finance_invoice_marks (
+    source_key TEXT PRIMARY KEY,
+    invoiced SMALLINT NOT NULL DEFAULT 1,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS promotions (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
