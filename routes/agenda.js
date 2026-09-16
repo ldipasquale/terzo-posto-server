@@ -35,6 +35,23 @@ const flyerUpload = multer({
 
 const router = express.Router();
 
+const PARTNERS = ['Lucho', 'Bachi', 'Luli'];
+
+function parseResponsibleName(value) {
+  if (value == null) return null;
+  const name = String(value).trim();
+  if (!name) return '';
+  return PARTNERS.includes(name) ? name : undefined;
+}
+
+function partnerFromUserName(name) {
+  if (!name) return null;
+  const normalized = String(name).trim().toLowerCase();
+  const exact = PARTNERS.find((p) => p.toLowerCase() === normalized);
+  if (exact) return exact;
+  return PARTNERS.find((p) => normalized.includes(p.toLowerCase())) ?? null;
+}
+
 /** API always exposes agenda dates as YYYY-MM-DD (pg may return Date or ISO string). */
 function sqlDateToYmd(value) {
   if (value == null || value === '') return undefined;
@@ -107,6 +124,7 @@ const mapRental = (row) => ({
       ? Number(row.has_tickets) === 1 ||
         (row.ticket_price != null && Number(row.ticket_price) > 0)
       : Number(row.has_entradas) === 1,
+  responsibleName: row.responsible_name || undefined,
   slug: row.slug || undefined,
   transferAlias: row.transfer_alias || undefined,
   transferHolder: row.transfer_holder || undefined,
@@ -385,12 +403,18 @@ router.post('/rentals', async (req, res) => {
     const r = req.body;
     const roomId = normalizeRoomId(r?.roomId);
     const personName = String(r?.personName ?? '').trim();
-    const requiresResponsible = r?.type !== 'one-off';
+    const requiresContact = r?.type !== 'one-off';
+    const responsibleParsed = parseResponsibleName(r?.responsibleName);
+    if (responsibleParsed === undefined) {
+      return res.status(400).json({ error: 'Responsable inválido' });
+    }
+    const responsibleName =
+      responsibleParsed || partnerFromUserName(req.user?.name) || null;
     if (
       !r?.type ||
       !String(r?.activityName ?? '').trim() ||
       !roomId ||
-      (requiresResponsible && !personName)
+      (requiresContact && !personName)
     ) {
       return res.status(400).json({ error: 'Datos inválidos de alquiler' });
     }
@@ -404,13 +428,13 @@ router.post('/rentals', async (req, res) => {
         schedules, price_per_hour, start_month, end_month, event_type, date, start_time, end_time,
         fixed_price, consumption_credit, has_tickets, ticket_price, revenue_share_percent, room_insurance_price, date_slots,
         staff_count, staff_food, staff_drinks, event_timeline, technical_needs,
-        transfer_alias, transfer_holder, event_description, has_entradas
+        transfer_alias, transfer_holder, event_description, has_entradas, responsible_name
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22, $23,
-        $24, $25, $26, $27, $28, $29, $30, $31, $32
+        $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
       )`,
       [
         id,
@@ -445,6 +469,7 @@ router.post('/rentals', async (req, res) => {
         emptyToNullText(r.transferHolder),
         emptyToNullText(r.eventDescription),
         r.hasEntradas == null ? null : r.hasEntradas ? 1 : 0,
+        responsibleName,
       ],
     );
     const created = await db.query(
@@ -510,6 +535,14 @@ router.put('/rentals/:id', async (req, res) => {
       'eventDescription',
       emptyToNullText,
     );
+    let responsibleNameField = { present: false, value: null };
+    if (Object.prototype.hasOwnProperty.call(r, 'responsibleName')) {
+      const parsed = parseResponsibleName(r.responsibleName);
+      if (parsed === undefined) {
+        return res.status(400).json({ error: 'Responsable inválido' });
+      }
+      responsibleNameField = { present: true, value: parsed || null };
+    }
     const result = await db.query(
       `UPDATE agenda_rentals SET
         type = COALESCE($1, type),
@@ -543,6 +576,7 @@ router.put('/rentals/:id', async (req, res) => {
         transfer_holder = CASE WHEN $38::boolean THEN $37 ELSE transfer_holder END,
         event_description = CASE WHEN $40::boolean THEN $39 ELSE event_description END,
         has_entradas = COALESCE($41, has_entradas),
+        responsible_name = CASE WHEN $43::boolean THEN $42 ELSE responsible_name END,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = $23`,
       [
@@ -587,6 +621,8 @@ router.put('/rentals/:id', async (req, res) => {
         eventDescriptionField.value,
         eventDescriptionField.present,
         r.hasEntradas == null ? null : r.hasEntradas ? 1 : 0,
+        responsibleNameField.value,
+        responsibleNameField.present,
       ],
     );
     if (result.rowCount === 0)
@@ -699,6 +735,7 @@ router.get('/ticket-alerts', async (_req, res) => {
       `SELECT
          r.id AS rental_id,
          r.activity_name,
+         r.responsible_name,
          r.date,
          r.start_time,
          r.end_time,
@@ -707,7 +744,7 @@ router.get('/ticket-alerts', async (_req, res) => {
        FROM event_tickets t
        JOIN agenda_rentals r ON r.id = t.rental_id
        WHERE t.status = 'pending'
-       GROUP BY r.id, r.activity_name, r.date, r.start_time, r.end_time
+       GROUP BY r.id, r.activity_name, r.responsible_name, r.date, r.start_time, r.end_time
        ORDER BY r.date ASC NULLS LAST, r.activity_name ASC`,
     );
 
@@ -728,7 +765,7 @@ router.get('/ticket-alerts', async (_req, res) => {
       rentalIds.length === 0
         ? { rows: [] }
         : await db.query(
-            `SELECT id, activity_name, date, start_time, end_time
+            `SELECT id, activity_name, responsible_name, date, start_time, end_time
              FROM agenda_rentals
              WHERE id = ANY($1::text[])`,
             [rentalIds],
@@ -773,6 +810,7 @@ router.get('/ticket-alerts', async (_req, res) => {
         eventDate: sqlDateToYmd(rental.date) || null,
         startTime: rental.start_time || null,
         endTime: rental.end_time || null,
+        responsibleName: rental.responsible_name || undefined,
         pendingCash,
         pendingMp,
       });
@@ -785,6 +823,7 @@ router.get('/ticket-alerts', async (_req, res) => {
         eventDate: sqlDateToYmd(row.date) || null,
         startTime: row.start_time || null,
         endTime: row.end_time || null,
+        responsibleName: row.responsible_name || undefined,
         count: Number(row.count) || 0,
         quantity: Number(row.quantity) || 0,
       })),

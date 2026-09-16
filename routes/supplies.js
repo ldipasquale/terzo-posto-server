@@ -5,6 +5,15 @@ import { randomUUID } from 'crypto';
 const router = express.Router();
 
 const VALID_UNITS = ['g', 'ml', 'unidad'];
+const VALID_ORIGINS = ['almacen', 'verduleria', 'carniceria', 'bebidas', 'otro'];
+
+function parseOrigin(type, origin) {
+  if (type !== 'purchased') return null;
+  if (origin == null || origin === '') return null;
+  const value = String(origin).trim().toLowerCase();
+  if (!VALID_ORIGINS.includes(value)) return undefined;
+  return value;
+}
 
 function parseRecipe(recipeJson) {
   if (recipeJson == null) return null;
@@ -64,6 +73,7 @@ function rowToSupply(row, latestPurchaseMap = {}, costInfo = null) {
     name: row.name,
     type: row.type,
     unit: row.unit ?? undefined,
+    origin: row.origin ?? undefined,
     purchasePrice: row.purchase_price != null ? Number(row.purchase_price) : undefined,
     purchaseQuantity: row.purchase_quantity != null ? Number(row.purchase_quantity) : undefined,
     recipe: recipeNormalized ?? undefined,
@@ -151,7 +161,7 @@ router.get('/', async (req, res) => {
   try {
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const result = await db.query(`
-      SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
       FROM supplies
       ORDER BY name
     `);
@@ -181,7 +191,7 @@ router.get('/:id', async (req, res) => {
   try {
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const all = await db.query(`
-      SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
       FROM supplies
     `);
     const suppliesById = {};
@@ -214,6 +224,7 @@ router.post('/', async (req, res) => {
       name,
       type,
       unit,
+      origin,
       purchasePrice,
       purchaseQuantity,
       recipe,
@@ -229,6 +240,12 @@ router.post('/', async (req, res) => {
     }
 
     const supplyId = id && String(id).trim() ? String(id).trim() : randomUUID();
+    const originParsed = parseOrigin(type, origin);
+    if (originParsed === undefined) {
+      return res.status(400).json({
+        error: 'origin debe ser almacen, verduleria, carniceria, bebidas u otro',
+      });
+    }
 
     if (type === 'purchased') {
       if (!unit || !VALID_UNITS.includes(unit)) {
@@ -255,6 +272,7 @@ router.post('/', async (req, res) => {
       ? JSON.stringify(recipe.map(normalizeRecipeLine).filter(Boolean))
       : null;
     const unitVal = type === 'purchased' && unit ? unit : null;
+    const originVal = originParsed;
     const purchasePriceVal = type === 'purchased' && purchasePrice != null ? Number(purchasePrice) : null;
     const purchaseQuantityVal = type === 'purchased' && purchaseQuantity != null ? Number(purchaseQuantity) : null;
     const yieldAmountVal = type === 'composed' && yieldAmount != null ? Number(yieldAmount) : null;
@@ -277,7 +295,7 @@ router.post('/', async (req, res) => {
       yield_unit: yieldUnitVal,
     };
     const allRows = await db.query(
-      'SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
+      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
     );
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
@@ -295,13 +313,14 @@ router.post('/', async (req, res) => {
     }
 
     await db.query(
-      `INSERT INTO supplies (id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO supplies (id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         supplyId,
         name,
         type,
         unitVal,
+        originVal,
         purchasePriceVal,
         purchaseQuantityVal,
         recipeJson,
@@ -312,7 +331,7 @@ router.post('/', async (req, res) => {
 
     const row = (
       await db.query(
-        `SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
          FROM supplies WHERE id = $1`,
         [supplyId],
       )
@@ -342,6 +361,7 @@ router.put('/:id', async (req, res) => {
       name,
       type,
       unit,
+      origin,
       purchasePrice,
       purchaseQuantity,
       recipe,
@@ -357,6 +377,22 @@ router.put('/:id', async (req, res) => {
     }
 
     const id = req.params.id;
+    const originParsed = parseOrigin(type, origin);
+    if (originParsed === undefined) {
+      return res.status(400).json({
+        error: 'origin debe ser almacen, verduleria, carniceria, bebidas u otro',
+      });
+    }
+
+    const existingRes = await db.query(
+      `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit
+       FROM supplies WHERE id = $1`,
+      [id],
+    );
+    const existing = existingRes.rows[0];
+    if (!existing) {
+      return res.status(404).json({ error: 'Insumo no encontrado' });
+    }
 
     if (type === 'purchased') {
       if (!unit || !VALID_UNITS.includes(unit)) {
@@ -383,8 +419,23 @@ router.put('/:id', async (req, res) => {
       ? JSON.stringify(recipe.map(normalizeRecipeLine).filter(Boolean))
       : null;
     const unitVal = type === 'purchased' && unit ? unit : null;
-    const purchasePriceVal = type === 'purchased' && purchasePrice != null ? Number(purchasePrice) : null;
-    const purchaseQuantityVal = type === 'purchased' && purchaseQuantity != null ? Number(purchaseQuantity) : null;
+    const originVal = originParsed;
+    const purchasePriceVal =
+      type === 'purchased'
+        ? Object.prototype.hasOwnProperty.call(req.body, 'purchasePrice')
+          ? purchasePrice != null
+            ? Number(purchasePrice)
+            : null
+          : existing.purchase_price
+        : null;
+    const purchaseQuantityVal =
+      type === 'purchased'
+        ? Object.prototype.hasOwnProperty.call(req.body, 'purchaseQuantity')
+          ? purchaseQuantity != null
+            ? Number(purchaseQuantity)
+            : null
+          : existing.purchase_quantity
+        : null;
     const yieldAmountVal = type === 'composed' && yieldAmount != null ? Number(yieldAmount) : null;
     const yieldUnitVal = type === 'composed' && yieldUnit ? yieldUnit : null;
 
@@ -404,7 +455,7 @@ router.put('/:id', async (req, res) => {
       yield_unit: yieldUnitVal,
     };
     const allRows = await db.query(
-      'SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
+      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
     );
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
@@ -423,12 +474,13 @@ router.put('/:id', async (req, res) => {
 
     const result = await db.query(
       `UPDATE supplies
-       SET name = $1, type = $2, unit = $3, purchase_price = $4, purchase_quantity = $5, recipe = $6, yield_amount = $7, yield_unit = $8, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $9`,
+       SET name = $1, type = $2, unit = $3, origin = $4, purchase_price = $5, purchase_quantity = $6, recipe = $7, yield_amount = $8, yield_unit = $9, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $10`,
       [
         name,
         type,
         unitVal,
+        originVal,
         purchasePriceVal,
         purchaseQuantityVal,
         recipeJson,
@@ -442,9 +494,16 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Insumo no encontrado' });
     }
 
+    if (type === 'purchased' && name !== existing.name) {
+      await db.query(
+        'UPDATE buffet_purchase_items SET supply_name = $1 WHERE supply_id = $2',
+        [name, id],
+      );
+    }
+
     const row = (
       await db.query(
-        `SELECT id, name, type, unit, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
          FROM supplies WHERE id = $1`,
         [id],
       )

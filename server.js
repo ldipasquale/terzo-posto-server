@@ -17,6 +17,7 @@ import usersRoutes from './routes/users.js';
 import directorioRoutes from './routes/directorio.js';
 import instagramRoutes from './routes/instagram.js';
 import publicTicketsRoutes from './routes/publicTickets.js';
+import productionPlanRoutes from './routes/productionPlan.js';
 import { authenticateToken } from './middleware/auth.js';
 import {
   requireAnyPermission,
@@ -89,6 +90,12 @@ app.use(
   authenticateToken,
   requireAnyPermission(PERMISSIONS.BUFFET_GESTION),
   purchasesRoutes,
+);
+app.use(
+  '/api/production-plan',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.BUFFET_GESTION),
+  productionPlanRoutes,
 );
 app.use(
   '/api/cups',

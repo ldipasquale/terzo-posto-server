@@ -149,7 +149,21 @@ const CREATE_TABLES = `
     recipe TEXT,
     yield_amount DOUBLE PRECISION,
     yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
+    origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS production_plans (
+    user_id TEXT PRIMARY KEY REFERENCES app_users(id) ON DELETE CASCADE,
+    step INTEGER NOT NULL DEFAULT 1,
+    plan_view TEXT NOT NULL DEFAULT 'tasks'
+      CHECK (plan_view IN ('tasks', 'purchases')),
+    dishes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    have_map JSONB NOT NULL DEFAULT '{}'::jsonb,
+    done_map JSONB NOT NULL DEFAULT '{}'::jsonb,
+    extra_tasks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    task_order JSONB NOT NULL DEFAULT '[]'::jsonb,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -210,6 +224,7 @@ const CREATE_TABLES = `
     consumption_credit DOUBLE PRECISION,
     has_tickets SMALLINT,
     has_entradas SMALLINT,
+    responsible_name TEXT,
     ticket_price DOUBLE PRECISION,
     slug TEXT,
     flyer_file TEXT,
@@ -394,6 +409,15 @@ async function initDb() {
   const client = await pool.connect();
   try {
     await client.query(CREATE_TABLES);
+
+    await client.query(
+      `ALTER TABLE production_plans
+       ADD COLUMN IF NOT EXISTS extra_tasks JSONB NOT NULL DEFAULT '[]'::jsonb`,
+    );
+    await client.query(
+      `ALTER TABLE production_plans
+       ADD COLUMN IF NOT EXISTS task_order JSONB NOT NULL DEFAULT '[]'::jsonb`,
+    );
 
     // Migrations: add columns if missing (for existing DBs)
     const menuCols = await client.query(
@@ -851,9 +875,21 @@ async function initDb() {
           recipe TEXT,
           yield_amount DOUBLE PRECISION,
           yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
+          origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+      `);
+    }
+
+    const supplyCols = await client.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'supplies'",
+    );
+    const supplyColNames = supplyCols.rows.map((r) => r.column_name);
+    if (!supplyColNames.includes('origin')) {
+      await client.query(`
+        ALTER TABLE supplies ADD COLUMN IF NOT EXISTS origin TEXT
+        CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro'))
       `);
     }
 
@@ -997,6 +1033,9 @@ async function initDb() {
     `);
     await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS has_entradas SMALLINT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS responsible_name TEXT;
     `);
     await client.query(`
       ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS buyer_email TEXT;
