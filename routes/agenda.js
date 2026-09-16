@@ -12,10 +12,18 @@ import {
   loadCatalog,
   loadTicketEmailContext,
   mapTicket,
+  mapTicketsWithMenu,
   newId,
   receiptExtension,
   soldByType,
 } from '../lib/eventTickets.js';
+import {
+  fulfillTicketMenuOrderIfCajaOpen,
+  revertPendingTicketMenuOrder,
+  saveEventTicketMenuItems,
+  ticketMenuTotalSql,
+  ticketNetAmount,
+} from '../lib/ticketMenu.js';
 import { isValidEmail, sendTicketEmailForRow } from '../lib/ticketEmail.js';
 import { resolveTicketTransferAccountId } from '../lib/ticketTransfer.js';
 import { getVenueLocation } from '../lib/venueLocation.js';
@@ -184,17 +192,10 @@ function isTicketIncomeType(paymentType) {
   return paymentType === 'tickets' || paymentType === 'ticket_sales';
 }
 
-function ticketNetAmount(row) {
-  return Math.max(
-    0,
-    Number(row.quantity) * Number(row.unit_price) -
-      (Number(row.discount_amount) || 0),
-  );
-}
-
 async function loadTicketSalesTotals(client, rentalId) {
   const tickets = await client.query(
-    `SELECT quantity, unit_price, discount_amount, payment_method
+    `SELECT quantity, unit_price, discount_amount, payment_method,
+            ${ticketMenuTotalSql('event_tickets.id')} AS menu_total
      FROM event_tickets
      WHERE rental_id = $1 AND status = 'approved'`,
     [rentalId],
@@ -749,7 +750,8 @@ router.get('/ticket-alerts', async (_req, res) => {
     );
 
     const approvedResult = await db.query(
-      `SELECT rental_id, quantity, unit_price, discount_amount, payment_method
+      `SELECT rental_id, quantity, unit_price, discount_amount, payment_method,
+              ${ticketMenuTotalSql('event_tickets.id')} AS menu_total
        FROM event_tickets
        WHERE status = 'approved'`,
     );
@@ -959,6 +961,9 @@ router.put('/rentals/:id/ticket-types', async (req, res) => {
         [rentalId],
       );
     }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'menu_item_ids')) {
+      await saveEventTicketMenuItems(client, rentalId, req.body.menu_item_ids);
+    }
     await ensureRentalSlug(client, {
       ...rental,
       has_tickets: incoming.length > 0 ? 1 : rental.has_tickets,
@@ -994,7 +999,7 @@ router.get('/rentals/:id/tickets', async (req, res) => {
         ? ' ORDER BY checked_in_at DESC'
         : ' ORDER BY purchase_date DESC';
     const result = await db.query(sql, params);
-    res.json(result.rows.map(mapTicket));
+    res.json(await mapTicketsWithMenu(db, result.rows));
   } catch (error) {
     console.error('Error fetching event tickets:', error);
     res.status(500).json({ error: 'Error al obtener entradas' });
@@ -1105,6 +1110,7 @@ router.post('/rentals/:id/tickets', async (req, res) => {
     const created = await db.query('SELECT * FROM event_tickets WHERE id = $1', [
       ticketId,
     ]);
+    const [ticket] = await mapTicketsWithMenu(db, created.rows);
     let emailSent = false;
     if (buyerEmail) {
       try {
@@ -1117,7 +1123,7 @@ router.post('/rentals/:id/tickets', async (req, res) => {
         console.error('door ticket email:', emailError);
       }
     }
-    res.status(201).json({ ...mapTicket(created.rows[0]), email_sent: emailSent });
+    res.status(201).json({ ...ticket, email_sent: emailSent });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error selling door ticket:', error);
@@ -1342,22 +1348,35 @@ router.delete('/rentals/:id/flyer', async (req, res) => {
 });
 
 router.patch('/tickets/:id', async (req, res) => {
+  const client = await db.connect();
   try {
     const status = String(req.body?.status || '');
     if (!['pending', 'approved', 'rejected'].includes(status)) {
       return res.status(400).json({ error: 'Estado inválido' });
     }
-    const result = await db.query(
+    await client.query('BEGIN');
+    const result = await client.query(
       'UPDATE event_tickets SET status = $1 WHERE id = $2 RETURNING *',
       [status, req.params.id],
     );
     if (result.rowCount === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Entrada no encontrada' });
     }
-    res.json(mapTicket(result.rows[0]));
+    if (status === 'approved') {
+      await fulfillTicketMenuOrderIfCajaOpen(client, req.params.id);
+    } else if (status === 'rejected') {
+      await revertPendingTicketMenuOrder(client, req.params.id);
+    }
+    await client.query('COMMIT');
+    const [ticket] = await mapTicketsWithMenu(db, result.rows);
+    res.json(ticket);
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error updating ticket status:', error);
     res.status(500).json({ error: 'Error al actualizar la entrada' });
+  } finally {
+    client.release();
   }
 });
 

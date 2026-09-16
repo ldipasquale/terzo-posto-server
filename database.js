@@ -283,6 +283,26 @@ const CREATE_TABLES = `
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS event_ticket_menu_items (
+    rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+    menu_item_id TEXT NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (rental_id, menu_item_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS event_ticket_menu_selections (
+    id TEXT PRIMARY KEY,
+    ticket_id TEXT NOT NULL REFERENCES event_tickets(id) ON DELETE CASCADE,
+    menu_item_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    price DOUBLE PRECISION NOT NULL,
+    category TEXT NOT NULL,
+    type TEXT NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS finance_transactions (
     id TEXT PRIMARY KEY,
     account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
@@ -1125,6 +1145,44 @@ async function initDb() {
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_event_tickets_rental_id
       ON event_tickets (rental_id)
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS event_ticket_menu_items (
+        rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+        menu_item_id TEXT NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (rental_id, menu_item_id)
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS event_ticket_menu_selections (
+        id TEXT PRIMARY KEY,
+        ticket_id TEXT NOT NULL REFERENCES event_tickets(id) ON DELETE CASCADE,
+        menu_item_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        price DOUBLE PRECISION NOT NULL,
+        category TEXT NOT NULL,
+        type TEXT NOT NULL,
+        quantity INTEGER NOT NULL CHECK (quantity > 0),
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_event_ticket_menu_items_rental_id
+      ON event_ticket_menu_items (rental_id)
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_event_ticket_menu_selections_ticket_id
+      ON event_ticket_menu_selections (ticket_id)
+    `);
+    await client.query(`
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS event_ticket_id TEXT
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_event_ticket_id
+      ON orders (event_ticket_id)
+      WHERE event_ticket_id IS NOT NULL
     `);
 
     await client.query(`

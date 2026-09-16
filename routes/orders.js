@@ -128,6 +128,7 @@ function formatOrder(order) {
       order.beeper_number != null && order.beeper_number !== ''
         ? Number(order.beeper_number)
         : undefined,
+    eventTicketId: order.event_ticket_id || undefined,
   };
   const payments = formatOrderPayments(order.payments_json);
   if (payments.length > 0) {

@@ -11,7 +11,7 @@ import {
   isReasonableArPhone,
   loadCatalog,
   loadTicketEmailContext,
-  mapTicket,
+  mapTicketsWithMenu,
   newId,
   phoneDigits,
   receiptExtension,
@@ -23,6 +23,12 @@ import {
   sendTicketEmailForRow,
 } from '../lib/ticketEmail.js';
 import { getVenueLocation } from '../lib/venueLocation.js';
+import {
+  fulfillTicketMenuOrderIfCajaOpen,
+  insertTicketMenuSelections,
+  parseTicketMenuSelections,
+  resolveTicketMenuSelections,
+} from '../lib/ticketMenu.js';
 
 const router = express.Router();
 
@@ -182,7 +188,23 @@ router.post('/events/:slug/tickets', (req, res) => {
       }
 
       const unitPrice = Number(type.price);
-      const isFree = Number.isFinite(unitPrice) && unitPrice <= 0;
+      const parsedMenu = parseTicketMenuSelections(req.body?.menu_items);
+      if (parsedMenu.error) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: parsedMenu.error });
+      }
+      const resolvedMenu = await resolveTicketMenuSelections(
+        client,
+        rental.id,
+        parsedMenu.items,
+      );
+      if (resolvedMenu.error) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: resolvedMenu.error });
+      }
+      const extrasTotal = resolvedMenu.total || 0;
+      const grandTotal = unitPrice * quantity + extrasTotal;
+      const isFree = grandTotal <= 0;
       if (!isFree && !req.file) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Subí el comprobante de transferencia' });
@@ -241,12 +263,20 @@ router.post('/events/:slug/tickets', (req, res) => {
           isFree ? 'approved' : 'pending',
         ],
       );
+      await insertTicketMenuSelections(
+        client,
+        ticketId,
+        resolvedMenu.selections || [],
+      );
+      if (isFree) {
+        await fulfillTicketMenuOrderIfCajaOpen(client, ticketId);
+      }
       await client.query('COMMIT');
 
       const created = await db.query('SELECT * FROM event_tickets WHERE id = $1', [
         ticketId,
       ]);
-      const ticket = mapTicket(created.rows[0]);
+      const [ticket] = await mapTicketsWithMenu(db, created.rows);
       try {
         const emailRow = await loadTicketEmailContext(db, ticketId);
         await sendTicketEmailForRow(emailRow, await getVenueLocation(db));

@@ -11,6 +11,7 @@ import {
   isOpeningChecklistComplete,
   normalizeOpeningChecklistRecord,
 } from "../lib/openingChecklist.js";
+import { fulfillTicketMenuOrdersForCaja } from "../lib/ticketMenu.js";
 
 const router = express.Router();
 
@@ -306,23 +307,34 @@ router.post("/", async (req, res) => {
     const id = crypto.randomUUID();
     const now = new Date();
     const date = now.toISOString().split("T")[0];
+    const client = await db.connect();
 
-    await db.query(
-      `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, status, opening_checklist)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)`,
-      [
-        id,
-        date,
-        mercadoPagoAccountId,
-        eventId || null,
-        eventName || null,
-        startingCash ?? null,
-        mpStartingBalanceDb,
-        normalizedChecklist.record
-          ? JSON.stringify(normalizedChecklist.record)
-          : null,
-      ]
-    );
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, status, opening_checklist)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)`,
+        [
+          id,
+          date,
+          mercadoPagoAccountId,
+          eventId || null,
+          eventName || null,
+          startingCash ?? null,
+          mpStartingBalanceDb,
+          normalizedChecklist.record
+            ? JSON.stringify(normalizedChecklist.record)
+            : null,
+        ]
+      );
+      await fulfillTicketMenuOrdersForCaja(client, id, eventId || null);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
 
     const result = await db.query("SELECT * FROM cash_registers WHERE id = $1", [id]);
     res.status(201).json(formatCashRegister(result.rows[0]));
