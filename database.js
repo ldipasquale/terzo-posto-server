@@ -26,6 +26,7 @@ const CREATE_TABLES = `
     popular SMALLINT NOT NULL DEFAULT 0,
     portions INTEGER NOT NULL DEFAULT 1,
     recipe TEXT NOT NULL DEFAULT '[]',
+    production_steps TEXT NOT NULL DEFAULT '[]',
     archived SMALLINT NOT NULL DEFAULT 0,
     requires_kitchen SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -287,6 +288,7 @@ const CREATE_TABLES = `
     rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
     menu_item_id TEXT NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
     position INTEGER NOT NULL DEFAULT 0,
+    price DOUBLE PRECISION,
     PRIMARY KEY (rental_id, menu_item_id)
   );
 
@@ -452,6 +454,11 @@ async function initDb() {
     if (!menuColNames.includes('recipe')) {
       await client.query(
         "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS recipe TEXT NOT NULL DEFAULT '[]'",
+      );
+    }
+    if (!menuColNames.includes('production_steps')) {
+      await client.query(
+        "ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS production_steps TEXT NOT NULL DEFAULT '[]'",
       );
     }
     if (!menuColNames.includes('archived')) {
@@ -1151,6 +1158,7 @@ async function initDb() {
         rental_id TEXT NOT NULL REFERENCES agenda_rentals(id) ON DELETE CASCADE,
         menu_item_id TEXT NOT NULL REFERENCES menu_items(id) ON DELETE CASCADE,
         position INTEGER NOT NULL DEFAULT 0,
+        price DOUBLE PRECISION,
         PRIMARY KEY (rental_id, menu_item_id)
       )
     `);
@@ -1167,6 +1175,10 @@ async function initDb() {
         quantity INTEGER NOT NULL CHECK (quantity > 0),
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
       )
+    `);
+    await client.query(`
+      ALTER TABLE event_ticket_menu_items
+      ADD COLUMN IF NOT EXISTS price DOUBLE PRECISION
     `);
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_event_ticket_menu_items_rental_id

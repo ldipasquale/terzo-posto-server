@@ -8,6 +8,19 @@ function asObject(value) {
   return value;
 }
 
+function sanitizeProductionStep(raw) {
+  if (typeof raw === "string") {
+    const text = raw.trim().slice(0, 200);
+    if (!text) return null;
+    return { id: text.toLowerCase(), text };
+  }
+  if (!raw || typeof raw !== "object") return null;
+  const id = String(raw.id || "").trim();
+  const text = String(raw.text || "").trim().slice(0, 200);
+  if (!text) return null;
+  return { id: id || text.toLowerCase(), text };
+}
+
 function sanitizeDish(raw) {
   if (!raw || typeof raw !== "object") return null;
   const id = String(raw.id || "").trim();
@@ -26,12 +39,16 @@ function sanitizeDish(raw) {
         })
         .filter(Boolean)
     : [];
+  const productionSteps = Array.isArray(raw.productionSteps)
+    ? raw.productionSteps.map(sanitizeProductionStep).filter(Boolean)
+    : [];
   return {
     id,
     name,
     portions: Number.isFinite(portions) && portions > 0 ? portions : 1,
     quantity: Math.floor(quantity),
     recipe,
+    productionSteps,
   };
 }
 

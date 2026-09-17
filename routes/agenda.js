@@ -961,8 +961,15 @@ router.put('/rentals/:id/ticket-types', async (req, res) => {
         [rentalId],
       );
     }
-    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'menu_item_ids')) {
-      await saveEventTicketMenuItems(client, rentalId, req.body.menu_item_ids);
+    if (
+      Object.prototype.hasOwnProperty.call(req.body || {}, 'menu_items') ||
+      Object.prototype.hasOwnProperty.call(req.body || {}, 'menu_item_ids')
+    ) {
+      await saveEventTicketMenuItems(
+        client,
+        rentalId,
+        req.body.menu_items ?? req.body.menu_item_ids,
+      );
     }
     await ensureRentalSlug(client, {
       ...rental,

@@ -1,10 +1,14 @@
+import crypto from 'crypto';
 import express from 'express';
 import db from '../database.js';
 
 const router = express.Router();
 
 const MENU_ITEM_COLUMNS =
-  'id, name, description, price, category, type, available, popular, portions, recipe, archived, requires_kitchen';
+  'id, name, description, price, category, type, available, popular, portions, recipe, production_steps, archived, requires_kitchen';
+
+const MAX_PRODUCTION_STEPS = 30;
+const MAX_PRODUCTION_STEP_TEXT = 200;
 
 function parseRecipe(recipeJson) {
   if (typeof recipeJson !== 'string') return [];
@@ -32,6 +36,43 @@ function normalizeMenuRecipe(recipe) {
     }));
 }
 
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+  try {
+    const arr = JSON.parse(value);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeProductionSteps(raw) {
+  const source = parseJsonArray(raw);
+  const seenIds = new Set();
+  const seenText = new Set();
+  const out = [];
+  for (const item of source) {
+    const text =
+      typeof item === 'string'
+        ? item.trim()
+        : String(item?.text ?? '').trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seenText.has(key)) continue;
+    seenText.add(key);
+    let id =
+      item && typeof item === 'object'
+        ? String(item.id ?? '').trim()
+        : '';
+    if (!id || seenIds.has(id)) id = crypto.randomUUID();
+    seenIds.add(id);
+    out.push({ id, text: text.slice(0, MAX_PRODUCTION_STEP_TEXT) });
+    if (out.length >= MAX_PRODUCTION_STEPS) break;
+  }
+  return out;
+}
+
 function formatMenuItem(item) {
   return {
     id: item.id,
@@ -44,6 +85,7 @@ function formatMenuItem(item) {
     popular: Boolean(item.popular),
     portions: item.portions != null ? item.portions : 1,
     recipe: normalizeMenuRecipe(parseRecipe(item.recipe)),
+    productionSteps: normalizeProductionSteps(item.production_steps),
     archived: Boolean(item.archived),
     requiresKitchen:
       item.type === 'comida' &&
@@ -109,6 +151,7 @@ router.post('/', async (req, res) => {
       popular,
       portions,
       recipe,
+      productionSteps,
       archived,
       requiresKitchen: requiresKitchenBody,
     } = req.body;
@@ -127,14 +170,17 @@ router.post('/', async (req, res) => {
       ? normalizeMenuRecipe(recipe)
       : [];
     const recipeJson = JSON.stringify(recipeNormalized);
+    const productionStepsJson = JSON.stringify(
+      normalizeProductionSteps(productionSteps),
+    );
     const portionsNum =
       typeof portions === 'number' && portions >= 1 ? portions : 1;
     const requiresKitchen =
       type === 'comida' ? (requiresKitchenBody === false ? 0 : 1) : 0;
 
     await db.query(
-      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, archived, requires_kitchen)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, production_steps, archived, requires_kitchen)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         id,
         name,
@@ -146,6 +192,7 @@ router.post('/', async (req, res) => {
         popular ? 1 : 0,
         portionsNum,
         recipeJson,
+        productionStepsJson,
         archived ? 1 : 0,
         requiresKitchen,
       ],
@@ -222,6 +269,13 @@ router.put('/:id', async (req, res) => {
       recipeJson = JSON.stringify(recipeNormalized);
     }
 
+    let productionStepsJson = existing.production_steps;
+    if (body.productionSteps !== undefined) {
+      productionStepsJson = JSON.stringify(
+        normalizeProductionSteps(body.productionSteps),
+      );
+    }
+
     let portionsNum = existing.portions != null ? existing.portions : 1;
     if (body.portions !== undefined) {
       portionsNum =
@@ -239,9 +293,10 @@ router.put('/:id', async (req, res) => {
     await db.query(
       `UPDATE menu_items
        SET name = $1, description = $2, price = $3, category = $4, type = $5,
-           available = $6, popular = $7, portions = $8, recipe = $9, archived = $10,
-           requires_kitchen = $11, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $12`,
+           available = $6, popular = $7, portions = $8, recipe = $9,
+           production_steps = $10, archived = $11,
+           requires_kitchen = $12, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $13`,
       [
         name,
         description,
@@ -252,6 +307,7 @@ router.put('/:id', async (req, res) => {
         popular,
         portionsNum,
         recipeJson,
+        productionStepsJson,
         archived,
         requiresKitchen,
         req.params.id,
