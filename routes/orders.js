@@ -190,6 +190,33 @@ function computeOrderItemsSubtotal(items) {
   return sum;
 }
 
+async function findOpenPendingBeeperOrder(
+  dbOrClient,
+  beeperNumber,
+  { cashRegisterId, excludeOrderId } = {},
+) {
+  const params = [beeperNumber];
+  let sql = `
+    SELECT o.id
+    FROM orders o
+    JOIN cash_registers cr ON cr.id = o.cash_register_id
+    WHERE o.beeper_number = $1
+      AND o.status = 'pending'
+      AND cr.status = 'open'
+  `;
+  if (cashRegisterId) {
+    params.push(cashRegisterId);
+    sql += ` AND o.cash_register_id = $${params.length}`;
+  }
+  if (excludeOrderId) {
+    params.push(excludeOrderId);
+    sql += ` AND o.id <> $${params.length}`;
+  }
+  sql += ' LIMIT 1';
+  const result = await dbOrClient.query(sql, params);
+  return result.rows[0] ?? null;
+}
+
 /**
  * GET /orders
  * Query: forCashRegisterPeriod=true limits orders to those whose cash_register_id
@@ -470,9 +497,12 @@ router.post('/', async (req, res) => {
       }
       beeperNumber = parsedBeeper;
     }
-    if (hasFood && beeperNumber == null) {
+
+    const hasCustomer =
+      resolvedCustomerName.length > 0 && resolvedCustomerName !== '—';
+    if (hasFood && !hasCustomer && beeperNumber == null) {
       return res.status(400).json({
-        error: 'El número de Beeper es obligatorio para pedidos con comida',
+        error: 'Indicá un beeper o el nombre del cliente',
       });
     }
 
@@ -606,6 +636,22 @@ router.post('/', async (req, res) => {
     try {
       await client.query('BEGIN');
 
+      if (beeperNumber != null) {
+        await client.query('SELECT pg_advisory_xact_lock($1)', [
+          870000 + beeperNumber,
+        ]);
+        const occupied = await findOpenPendingBeeperOrder(client, beeperNumber, {
+          cashRegisterId: cashRegisterId || null,
+        });
+        if (occupied) {
+          const err = new Error(
+            `El beeper ${beeperNumber} ya está asignado a otro pedido`,
+          );
+          err.statusCode = 409;
+          throw err;
+        }
+      }
+
       let row = (
         await client.query('SELECT value FROM settings WHERE key = $1', [
           'order_counter',
@@ -738,6 +784,17 @@ router.post('/', async (req, res) => {
     const order = result.rows[0];
     res.status(201).json(formatOrder(order));
   } catch (error) {
+    if (error?.statusCode === 400 || error?.statusCode === 409) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
+    if (
+      error?.code === '23505' &&
+      error?.constraint === 'uniq_orders_beeper_in_circulation'
+    ) {
+      return res.status(409).json({
+        error: 'El beeper ya está asignado a otro pedido',
+      });
+    }
     console.error('Error creating order:', error);
     res.status(500).json({ error: 'Error al crear el pedido' });
   }
@@ -759,13 +816,29 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     const prevResult = await db.query(
-      `SELECT status FROM orders WHERE id = $1`,
+      `SELECT status, beeper_number, cash_register_id FROM orders WHERE id = $1`,
       [id],
     );
     if (prevResult.rowCount === 0) {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
-    const previousStatus = prevResult.rows[0].status;
+    const beeperNumber =
+      prevResult.rows[0].beeper_number != null
+        ? Number(prevResult.rows[0].beeper_number)
+        : null;
+    const orderCashRegisterId = prevResult.rows[0].cash_register_id || null;
+
+    if (status === 'pending' && beeperNumber != null) {
+      const occupied = await findOpenPendingBeeperOrder(db, beeperNumber, {
+        cashRegisterId: orderCashRegisterId,
+        excludeOrderId: id,
+      });
+      if (occupied) {
+        return res.status(409).json({
+          error: `El beeper ${beeperNumber} ya está asignado a otro pedido`,
+        });
+      }
+    }
 
     const result = await db.query(
       `UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
@@ -776,7 +849,15 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
 
-    if (status === 'delivered') {
+    if (status === 'ready') {
+      await db.query(
+        `UPDATE order_items
+         SET is_delivered = TRUE,
+             delivered_at = COALESCE(delivered_at, CURRENT_TIMESTAMP)
+         WHERE order_id = $1 AND type = 'comida'`,
+        [id],
+      );
+    } else if (status === 'delivered') {
       await db.query(
         `UPDATE order_items
          SET is_delivered = TRUE,
@@ -784,7 +865,7 @@ router.patch('/:id/status', async (req, res) => {
          WHERE order_id = $1`,
         [id],
       );
-    } else if (status === 'pending' && previousStatus === 'delivered') {
+    } else if (status === 'pending') {
       await db.query(
         `UPDATE order_items
          SET is_delivered = FALSE,
@@ -800,6 +881,14 @@ router.patch('/:id/status', async (req, res) => {
     );
     res.json(formatOrder(orderResult.rows[0]));
   } catch (error) {
+    if (
+      error?.code === '23505' &&
+      error?.constraint === 'uniq_orders_beeper_in_circulation'
+    ) {
+      return res.status(409).json({
+        error: 'El beeper ya está asignado a otro pedido',
+      });
+    }
     console.error('Error updating order:', error);
     res.status(500).json({ error: 'Error al actualizar el pedido' });
   }

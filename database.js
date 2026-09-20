@@ -151,6 +151,7 @@ const CREATE_TABLES = `
     yield_amount DOUBLE PRECISION,
     yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
     origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
+    requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -903,6 +904,7 @@ async function initDb() {
           yield_amount DOUBLE PRECISION,
           yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
           origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
+          requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -917,6 +919,12 @@ async function initDb() {
       await client.query(`
         ALTER TABLE supplies ADD COLUMN IF NOT EXISTS origin TEXT
         CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro'))
+      `);
+    }
+    if (!supplyColNames.includes('requires_elaboration')) {
+      await client.query(`
+        ALTER TABLE supplies
+        ADD COLUMN IF NOT EXISTS requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE
       `);
     }
 
@@ -984,6 +992,22 @@ async function initDb() {
       await client.query(
         `ALTER TABLE orders ADD COLUMN IF NOT EXISTS beeper_number INTEGER
          CHECK (beeper_number IS NULL OR (beeper_number >= 1 AND beeper_number <= 20))`,
+      );
+    }
+    await client.query('ALTER TABLE orders DROP COLUMN IF EXISTS ready_at');
+    try {
+      await client.query(
+        'DROP INDEX IF EXISTS uniq_orders_beeper_in_circulation',
+      );
+      await client.query(`
+        CREATE UNIQUE INDEX uniq_orders_beeper_in_circulation
+        ON orders (cash_register_id, beeper_number)
+        WHERE beeper_number IS NOT NULL AND status = 'pending'
+      `);
+    } catch (err) {
+      console.warn(
+        'No se pudo crear uniq_orders_beeper_in_circulation (puede haber beepers duplicados en pedidos pendientes):',
+        err.message,
       );
     }
 

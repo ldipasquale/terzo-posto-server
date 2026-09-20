@@ -15,6 +15,13 @@ function parseOrigin(type, origin) {
   return value;
 }
 
+function parseRequiresElaboration(type, value, fallback = true) {
+  if (type !== 'composed') return true;
+  if (value === false || value === 0 || value === 'false' || value === '0') return false;
+  if (value === true || value === 1 || value === 'true' || value === '1') return true;
+  return fallback;
+}
+
 function parseRecipe(recipeJson) {
   if (recipeJson == null) return null;
   if (typeof recipeJson !== 'string') return Array.isArray(recipeJson) ? recipeJson : null;
@@ -79,6 +86,8 @@ function rowToSupply(row, latestPurchaseMap = {}, costInfo = null) {
     recipe: recipeNormalized ?? undefined,
     yieldAmount: row.yield_amount != null ? Number(row.yield_amount) : undefined,
     yieldUnit: row.yield_unit ?? undefined,
+    requiresElaboration:
+      row.type === 'composed' ? row.requires_elaboration !== false : undefined,
     lastPurchaseQuantity:
       latest?.presentationQuantity == null
         ? undefined
@@ -161,7 +170,7 @@ router.get('/', async (req, res) => {
   try {
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const result = await db.query(`
-      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
       FROM supplies
       ORDER BY name
     `);
@@ -191,7 +200,7 @@ router.get('/:id', async (req, res) => {
   try {
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const all = await db.query(`
-      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
       FROM supplies
     `);
     const suppliesById = {};
@@ -230,6 +239,7 @@ router.post('/', async (req, res) => {
       recipe,
       yieldAmount,
       yieldUnit,
+      requiresElaboration,
     } = req.body;
 
     if (!name || !type) {
@@ -277,6 +287,7 @@ router.post('/', async (req, res) => {
     const purchaseQuantityVal = type === 'purchased' && purchaseQuantity != null ? Number(purchaseQuantity) : null;
     const yieldAmountVal = type === 'composed' && yieldAmount != null ? Number(yieldAmount) : null;
     const yieldUnitVal = type === 'composed' && yieldUnit ? yieldUnit : null;
+    const requiresElaborationVal = parseRequiresElaboration(type, requiresElaboration);
 
     // Cycle check
     const recipeArrForCandidate =
@@ -295,7 +306,7 @@ router.post('/', async (req, res) => {
       yield_unit: yieldUnitVal,
     };
     const allRows = await db.query(
-      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
+      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration FROM supplies',
     );
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
@@ -313,8 +324,8 @@ router.post('/', async (req, res) => {
     }
 
     await db.query(
-      `INSERT INTO supplies (id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      `INSERT INTO supplies (id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         supplyId,
         name,
@@ -326,12 +337,13 @@ router.post('/', async (req, res) => {
         recipeJson,
         yieldAmountVal,
         yieldUnitVal,
+        requiresElaborationVal,
       ],
     );
 
     const row = (
       await db.query(
-        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
          FROM supplies WHERE id = $1`,
         [supplyId],
       )
@@ -367,6 +379,7 @@ router.put('/:id', async (req, res) => {
       recipe,
       yieldAmount,
       yieldUnit,
+      requiresElaboration,
     } = req.body;
 
     if (!name || !type) {
@@ -385,7 +398,7 @@ router.put('/:id', async (req, res) => {
     }
 
     const existingRes = await db.query(
-      `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit
+      `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration
        FROM supplies WHERE id = $1`,
       [id],
     );
@@ -438,6 +451,11 @@ router.put('/:id', async (req, res) => {
         : null;
     const yieldAmountVal = type === 'composed' && yieldAmount != null ? Number(yieldAmount) : null;
     const yieldUnitVal = type === 'composed' && yieldUnit ? yieldUnit : null;
+    const requiresElaborationVal = parseRequiresElaboration(
+      type,
+      requiresElaboration,
+      existing.requires_elaboration !== false,
+    );
 
     const recipeArrForCandidate =
       type === 'composed' && Array.isArray(recipe)
@@ -455,7 +473,7 @@ router.put('/:id', async (req, res) => {
       yield_unit: yieldUnitVal,
     };
     const allRows = await db.query(
-      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit FROM supplies',
+      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration FROM supplies',
     );
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
@@ -474,8 +492,8 @@ router.put('/:id', async (req, res) => {
 
     const result = await db.query(
       `UPDATE supplies
-       SET name = $1, type = $2, unit = $3, origin = $4, purchase_price = $5, purchase_quantity = $6, recipe = $7, yield_amount = $8, yield_unit = $9, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $10`,
+       SET name = $1, type = $2, unit = $3, origin = $4, purchase_price = $5, purchase_quantity = $6, recipe = $7, yield_amount = $8, yield_unit = $9, requires_elaboration = $10, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $11`,
       [
         name,
         type,
@@ -486,6 +504,7 @@ router.put('/:id', async (req, res) => {
         recipeJson,
         yieldAmountVal,
         yieldUnitVal,
+        requiresElaborationVal,
         id,
       ],
     );
@@ -503,7 +522,7 @@ router.put('/:id', async (req, res) => {
 
     const row = (
       await db.query(
-        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, created_at, updated_at
+        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
          FROM supplies WHERE id = $1`,
         [id],
       )
