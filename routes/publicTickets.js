@@ -10,7 +10,7 @@ import {
   isPublicEventPast,
   isReasonableArPhone,
   loadCatalog,
-  loadTicketEmailContext,
+  loadTicketEmailContexts,
   mapTicketsWithMenu,
   newId,
   phoneDigits,
@@ -20,7 +20,7 @@ import {
 } from '../lib/eventTickets.js';
 import {
   isValidEmail,
-  sendTicketEmailForRow,
+  sendTicketEmailForRows,
 } from '../lib/ticketEmail.js';
 import { getVenueLocation } from '../lib/venueLocation.js';
 import {
@@ -31,6 +31,43 @@ import {
 } from '../lib/ticketMenu.js';
 
 const router = express.Router();
+
+function parsePurchaseLines(body) {
+  if (body?.lines != null && String(body.lines).trim() !== '') {
+    let parsed;
+    try {
+      parsed = JSON.parse(String(body.lines));
+    } catch {
+      return { error: 'Selección de entradas inválida' };
+    }
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return { error: 'Elegí al menos una entrada' };
+    }
+    const lines = [];
+    const seen = new Set();
+    for (const item of parsed) {
+      const ticketTypeId = String(item?.ticket_type_id || '').trim();
+      const quantity = Number(item?.quantity);
+      if (!ticketTypeId || seen.has(ticketTypeId)) {
+        return { error: 'Selección de entradas inválida' };
+      }
+      if (!Number.isInteger(quantity) || quantity < 1) {
+        return { error: 'Cantidad inválida' };
+      }
+      seen.add(ticketTypeId);
+      lines.push({ ticketTypeId, quantity });
+    }
+    return { lines };
+  }
+
+  const ticketTypeId = String(body?.ticket_type_id || '').trim();
+  const quantity = Number(body?.quantity);
+  if (!ticketTypeId) return { error: 'Elegí al menos una entrada' };
+  if (!Number.isInteger(quantity) || quantity < 1) {
+    return { error: 'Cantidad inválida' };
+  }
+  return { lines: [{ ticketTypeId, quantity }] };
+}
 
 function mapRecoveredTicket(row) {
   return {
@@ -141,22 +178,21 @@ router.post('/events/:slug/tickets', (req, res) => {
     }
     const client = await db.connect();
     try {
-      const ticketTypeId = String(req.body?.ticket_type_id || '').trim();
       const buyerName = String(req.body?.buyer_name || '').trim();
       const buyerPhone = String(req.body?.buyer_phone || '').trim();
       const buyerEmail = String(req.body?.buyer_email || '').trim().toLowerCase();
-      const quantity = Number(req.body?.quantity);
+      const parsedLines = parsePurchaseLines(req.body);
+      if (parsedLines.error) {
+        return res.status(400).json({ error: parsedLines.error });
+      }
       if (
-        !ticketTypeId ||
         !buyerName ||
         !isReasonableArPhone(buyerPhone) ||
         !isValidEmail(buyerEmail)
       ) {
         return res.status(400).json({ error: 'Datos del comprador inválidos' });
       }
-      if (!Number.isInteger(quantity) || quantity < 1) {
-        return res.status(400).json({ error: 'Cantidad inválida' });
-      }
+      const lines = parsedLines.lines;
 
       await client.query('BEGIN');
       const rentalResult = await client.query(
@@ -175,19 +211,20 @@ router.post('/events/:slug/tickets', (req, res) => {
         });
       }
 
+      const typeIds = lines.map((line) => line.ticketTypeId).sort();
       const typeResult = await client.query(
         `SELECT * FROM event_ticket_types
-         WHERE id = $1 AND rental_id = $2
+         WHERE rental_id = $1 AND id = ANY($2::text[])
+         ORDER BY id
          FOR UPDATE`,
-        [ticketTypeId, rental.id],
+        [rental.id, typeIds],
       );
-      const type = typeResult.rows[0];
-      if (!type) {
+      const typeById = new Map(typeResult.rows.map((row) => [row.id, row]));
+      if (typeById.size !== lines.length) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Tipo de entrada no encontrado' });
       }
 
-      const unitPrice = Number(type.price);
       const parsedMenu = parseTicketMenuSelections(req.body?.menu_items);
       if (parsedMenu.error) {
         await client.query('ROLLBACK');
@@ -202,39 +239,44 @@ router.post('/events/:slug/tickets', (req, res) => {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: resolvedMenu.error });
       }
+      const soldResult = await client.query(
+        `SELECT ticket_type_id, COALESCE(SUM(quantity), 0)::int AS sold
+         FROM event_tickets
+         WHERE ticket_type_id = ANY($1::text[]) AND status <> 'rejected'
+         GROUP BY ticket_type_id`,
+        [typeIds],
+      );
+      const soldById = new Map(
+        soldResult.rows.map((row) => [row.ticket_type_id, Number(row.sold)]),
+      );
+      const pricedLines = [];
+      for (const line of lines) {
+        const type = typeById.get(line.ticketTypeId);
+        const sold = soldById.get(type.id) || 0;
+        const remaining = Math.max(0, Number(type.available_quantity) - sold);
+        if (line.quantity > remaining) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: `No hay cupo suficiente para ${type.name}`,
+          });
+        }
+        pricedLines.push({
+          type,
+          quantity: line.quantity,
+          unitPrice: Number(type.price),
+        });
+      }
+
       const extrasTotal = resolvedMenu.total || 0;
-      const grandTotal = unitPrice * quantity + extrasTotal;
+      const ticketsTotal = pricedLines.reduce(
+        (sum, line) => sum + line.unitPrice * line.quantity,
+        0,
+      );
+      const grandTotal = ticketsTotal + extrasTotal;
       const isFree = grandTotal <= 0;
       if (!isFree && !req.file) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Subí el comprobante de transferencia' });
-      }
-
-      const soldResult = await client.query(
-        `SELECT COALESCE(SUM(quantity), 0)::int AS sold
-         FROM event_tickets
-         WHERE ticket_type_id = $1 AND status <> 'rejected'`,
-        [type.id],
-      );
-      const sold = Number(soldResult.rows[0].sold);
-      const remaining = Math.max(0, Number(type.available_quantity) - sold);
-      if (quantity > remaining) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: 'No hay cupo suficiente para esa cantidad' });
-      }
-
-      const catalog = await loadCatalog(client, rental, { publicView: true });
-      const available = catalog.ticket_types.filter(
-        (t) => t.available_quantity - t.sold_quantity > 0,
-      );
-      if (available.length > 1) {
-        const minPrice = Math.min(...available.map((t) => t.price));
-        if (Number(type.price) > minPrice) {
-          await client.query('ROLLBACK');
-          return res.status(409).json({
-            error: 'Por ahora solo se venden las entradas más baratas',
-          });
-        }
       }
 
       let receiptFile = null;
@@ -244,46 +286,59 @@ router.post('/events/:slug/tickets', (req, res) => {
         fs.writeFileSync(path.join(dir, receiptFile), req.file.buffer);
       }
 
-      const ticketId = newId();
-      await client.query(
-        `INSERT INTO event_tickets (
-          id, rental_id, ticket_type_id, quantity, unit_price,
-          buyer_name, buyer_phone, buyer_email, receipt_file, status, purchase_date
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CURRENT_TIMESTAMP)`,
-        [
-          ticketId,
-          rental.id,
-          type.id,
-          quantity,
-          unitPrice,
-          buyerName,
-          buyerPhone,
-          buyerEmail,
-          receiptFile,
-          isFree ? 'approved' : 'pending',
-        ],
-      );
+      const ticketIds = [];
+      for (const line of pricedLines) {
+        const ticketId = newId();
+        ticketIds.push(ticketId);
+        await client.query(
+          `INSERT INTO event_tickets (
+            id, rental_id, ticket_type_id, quantity, unit_price,
+            buyer_name, buyer_phone, buyer_email, receipt_file, status, purchase_date
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CURRENT_TIMESTAMP)`,
+          [
+            ticketId,
+            rental.id,
+            line.type.id,
+            line.quantity,
+            line.unitPrice,
+            buyerName,
+            buyerPhone,
+            buyerEmail,
+            receiptFile,
+            isFree ? 'approved' : 'pending',
+          ],
+        );
+      }
       await insertTicketMenuSelections(
         client,
-        ticketId,
+        ticketIds[0],
         resolvedMenu.selections || [],
       );
       if (isFree) {
-        await fulfillTicketMenuOrderIfCajaOpen(client, ticketId);
+        await fulfillTicketMenuOrderIfCajaOpen(client, ticketIds[0]);
       }
       await client.query('COMMIT');
 
-      const created = await db.query('SELECT * FROM event_tickets WHERE id = $1', [
-        ticketId,
-      ]);
-      const [ticket] = await mapTicketsWithMenu(db, created.rows);
+      const created = await db.query(
+        `SELECT t.*, tt.name AS ticket_type_name
+         FROM event_tickets t
+         JOIN event_ticket_types tt ON tt.id = t.ticket_type_id
+         WHERE t.id = ANY($1::text[])`,
+        [ticketIds],
+      );
+      const byId = new Map(created.rows.map((row) => [row.id, row]));
+      const ordered = ticketIds.map((id) => byId.get(id)).filter(Boolean);
+      const tickets = (await mapTicketsWithMenu(db, ordered)).map((ticket, index) => ({
+        ...ticket,
+        ticket_type_name: ordered[index]?.ticket_type_name,
+      }));
       try {
-        const emailRow = await loadTicketEmailContext(db, ticketId);
-        await sendTicketEmailForRow(emailRow, await getVenueLocation(db));
+        const emailRows = await loadTicketEmailContexts(db, ticketIds);
+        await sendTicketEmailForRows(emailRows, await getVenueLocation(db));
       } catch (emailError) {
         console.error('ticket email:', emailError);
       }
-      res.status(201).json(ticket);
+      res.status(201).json({ tickets });
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('public ticket:', error);
