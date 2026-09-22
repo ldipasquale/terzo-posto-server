@@ -281,6 +281,8 @@ const CREATE_TABLES = `
     status TEXT NOT NULL DEFAULT 'pending'
       CHECK (status IN ('pending', 'approved', 'rejected')),
     checked_in_at TIMESTAMP,
+    checked_in_count INTEGER NOT NULL DEFAULT 0,
+    purchase_id TEXT,
     purchase_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -304,6 +306,12 @@ const CREATE_TABLES = `
     type TEXT NOT NULL,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS event_documents (
+    rental_id TEXT PRIMARY KEY REFERENCES agenda_rentals(id) ON DELETE CASCADE,
+    content JSONB NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS finance_transactions (
@@ -1095,6 +1103,72 @@ async function initDb() {
       ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMP;
     `);
     await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS checked_in_count INTEGER NOT NULL DEFAULT 0;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS purchase_id TEXT;
+    `);
+    await client.query(`
+      UPDATE event_tickets
+      SET checked_in_count = quantity
+      WHERE checked_in_at IS NOT NULL
+        AND checked_in_count = 0
+    `);
+    await client.query(`
+      UPDATE event_tickets t
+      SET purchase_id = g.purchase_id
+      FROM (
+        SELECT receipt_file, MIN(id) AS purchase_id
+        FROM event_tickets
+        WHERE receipt_file IS NOT NULL AND btrim(receipt_file) <> ''
+        GROUP BY receipt_file
+      ) g
+      WHERE t.purchase_id IS NULL
+        AND t.receipt_file = g.receipt_file
+    `);
+    await client.query(`
+      UPDATE event_tickets t
+      SET purchase_id = g.purchase_id
+      FROM (
+        SELECT
+          rental_id,
+          buyer_name,
+          buyer_phone,
+          COALESCE(buyer_email, '') AS buyer_email,
+          floor(extract(epoch FROM purchase_date) / 5) AS bucket,
+          MIN(id) AS purchase_id
+        FROM event_tickets
+        WHERE purchase_id IS NULL
+          AND COALESCE(source, 'online') <> 'door'
+          AND (receipt_file IS NULL OR btrim(receipt_file) = '')
+        GROUP BY 1, 2, 3, 4, 5
+      ) g
+      WHERE t.purchase_id IS NULL
+        AND COALESCE(t.source, 'online') <> 'door'
+        AND (t.receipt_file IS NULL OR btrim(t.receipt_file) = '')
+        AND t.rental_id = g.rental_id
+        AND t.buyer_name = g.buyer_name
+        AND t.buyer_phone = g.buyer_phone
+        AND COALESCE(t.buyer_email, '') = g.buyer_email
+        AND floor(extract(epoch FROM t.purchase_date) / 5) = g.bucket
+    `);
+    await client.query(`
+      UPDATE event_tickets
+      SET purchase_id = id
+      WHERE purchase_id IS NULL
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_event_tickets_purchase_id
+      ON event_tickets (purchase_id)
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets DROP CONSTRAINT IF EXISTS event_tickets_checked_in_count_check;
+    `);
+    await client.query(`
+      ALTER TABLE event_tickets ADD CONSTRAINT event_tickets_checked_in_count_check
+      CHECK (checked_in_count >= 0 AND checked_in_count <= quantity);
+    `);
+    await client.query(`
       ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS payment_method TEXT;
     `);
     await client.query(`
@@ -1154,6 +1228,8 @@ async function initDb() {
         status TEXT NOT NULL DEFAULT 'pending'
           CHECK (status IN ('pending', 'approved', 'rejected')),
         checked_in_at TIMESTAMP,
+        checked_in_count INTEGER NOT NULL DEFAULT 0,
+        purchase_id TEXT,
         purchase_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )

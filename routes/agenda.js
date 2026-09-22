@@ -644,6 +644,96 @@ router.put('/rentals/:id', async (req, res) => {
   }
 });
 
+const MAX_EVENT_DOCUMENT_CHARS = 400_000;
+const EMPTY_EVENT_DOCUMENT = { type: 'doc', content: [{ type: 'paragraph' }] };
+
+function parseEventDocumentContent(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.type !== 'doc') return null;
+  if (value.content != null && !Array.isArray(value.content)) return null;
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return null;
+  }
+  if (!serialized || serialized.length > MAX_EVENT_DOCUMENT_CHARS) return null;
+  return JSON.parse(serialized);
+}
+
+function documentTimestamp(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+async function loadOneOffEvent(id) {
+  const result = await db.query(
+    'SELECT id, type, activity_name, date FROM agenda_rentals WHERE id = $1',
+    [id],
+  );
+  const row = result.rows[0];
+  if (!row || row.type !== 'one-off') return null;
+  return row;
+}
+
+function mapEventDocument(rental, row) {
+  let content = row?.content ?? EMPTY_EVENT_DOCUMENT;
+  if (typeof content === 'string') {
+    try {
+      content = JSON.parse(content);
+    } catch {
+      content = EMPTY_EVENT_DOCUMENT;
+    }
+  }
+  if (!content || content.type !== 'doc') content = EMPTY_EVENT_DOCUMENT;
+  return {
+    rentalId: rental.id,
+    activityName: rental.activity_name,
+    date: sqlDateToYmd(rental.date),
+    content,
+    updatedAt: documentTimestamp(row?.updated_at),
+  };
+}
+
+router.get('/rentals/:id/document', async (req, res) => {
+  try {
+    const rental = await loadOneOffEvent(req.params.id);
+    if (!rental) return res.status(404).json({ error: 'Evento no encontrado' });
+    const doc = await db.query(
+      'SELECT content, updated_at FROM event_documents WHERE rental_id = $1',
+      [rental.id],
+    );
+    res.json(mapEventDocument(rental, doc.rows[0]));
+  } catch (error) {
+    console.error('Error fetching event document:', error);
+    res.status(500).json({ error: 'Error al obtener el documento' });
+  }
+});
+
+router.put('/rentals/:id/document', async (req, res) => {
+  try {
+    const rental = await loadOneOffEvent(req.params.id);
+    if (!rental) return res.status(404).json({ error: 'Evento no encontrado' });
+    const content = parseEventDocumentContent(req.body?.content);
+    if (!content) {
+      return res.status(400).json({ error: 'El documento no es válido' });
+    }
+    const saved = await db.query(
+      `INSERT INTO event_documents (rental_id, content, updated_at)
+       VALUES ($1, $2::jsonb, CURRENT_TIMESTAMP)
+       ON CONFLICT (rental_id) DO UPDATE
+       SET content = EXCLUDED.content, updated_at = CURRENT_TIMESTAMP
+       RETURNING content, updated_at`,
+      [rental.id, JSON.stringify(content)],
+    );
+    res.json(mapEventDocument(rental, saved.rows[0]));
+  } catch (error) {
+    console.error('Error saving event document:', error);
+    res.status(500).json({ error: 'Error al guardar el documento' });
+  }
+});
+
 router.delete('/rentals/:id', async (req, res) => {
   try {
     const result = await db.query('DELETE FROM agenda_rentals WHERE id = $1', [
@@ -1094,10 +1184,10 @@ router.post('/rentals/:id/tickets', async (req, res) => {
         id, rental_id, ticket_type_id, quantity, unit_price,
         buyer_name, buyer_phone, buyer_email, receipt_file, status,
         payment_method, mercado_pago_account_id, discount_amount, source,
-        purchase_date
+        purchase_id, purchase_date
       ) VALUES (
         $1,$2,$3,$4,$5,$6,'',$7,NULL,'approved',
-        $8,$9,$10,'door', CURRENT_TIMESTAMP
+        $8,$9,$10,'door',$1, CURRENT_TIMESTAMP
       )`,
       [
         ticketId,
@@ -1225,66 +1315,143 @@ function ticketCheckInView(row) {
   };
 }
 
+function purchaseCheckInTotals(rows) {
+  return rows.reduce(
+    (totals, item) => ({
+      quantity: totals.quantity + Number(item.quantity),
+      checkedIn: totals.checkedIn + (Number(item.checked_in_count) || 0),
+    }),
+    { quantity: 0, checkedIn: 0 },
+  );
+}
+
+function latestCheckedInRow(rows, fallback) {
+  return rows.reduce((best, item) => {
+    if (!item.checked_in_at) return best;
+    if (!best?.checked_in_at) return item;
+    return new Date(item.checked_in_at) > new Date(best.checked_in_at)
+      ? item
+      : best;
+  }, null) || fallback;
+}
+
 router.post('/tickets/check-in', async (req, res) => {
+  const client = await db.connect();
   try {
     const ticketId = String(req.body?.ticket_id || '').trim();
     if (!TICKET_ID_RE.test(ticketId)) {
       return res.status(409).json({ ok: false, reason: 'invalid_code' });
     }
 
-    const found = await db.query(
+    await client.query('BEGIN');
+    const peek = await client.query(
+      `SELECT id, purchase_id, status
+       FROM event_tickets
+       WHERE id = $1`,
+      [ticketId],
+    );
+    const peeked = peek.rows[0];
+    if (!peeked) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ ok: false, reason: 'not_found' });
+    }
+
+    const purchaseId = peeked.purchase_id || peeked.id;
+    const group = await client.query(
       `SELECT t.*, r.activity_name, tt.name AS ticket_type_name
        FROM event_tickets t
        JOIN agenda_rentals r ON r.id = t.rental_id
        JOIN event_ticket_types tt ON tt.id = t.ticket_type_id
-       WHERE t.id = $1`,
-      [ticketId],
+       WHERE t.purchase_id = $1 OR t.id = $2
+       ORDER BY t.id ASC
+       FOR UPDATE OF t`,
+      [purchaseId, ticketId],
     );
-    const row = found.rows[0];
-    if (!row) {
+    const scanned = group.rows.find((item) => item.id === ticketId);
+    if (!scanned) {
+      await client.query('ROLLBACK');
       return res.status(409).json({ ok: false, reason: 'not_found' });
     }
-    const view = ticketCheckInView(row);
-    if (row.status === 'pending') {
-      return res.status(409).json({ ok: false, reason: 'pending', ...view });
-    }
-    if (row.status === 'rejected') {
-      return res.status(409).json({ ok: false, reason: 'rejected', ...view });
-    }
-    if (row.checked_in_at) {
+    if (scanned.status === 'pending') {
+      await client.query('ROLLBACK');
       return res.status(409).json({
         ok: false,
-        reason: 'already_checked_in',
-        ...view,
+        reason: 'pending',
+        ...ticketCheckInView(scanned),
+      });
+    }
+    if (scanned.status === 'rejected') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        ok: false,
+        reason: 'rejected',
+        ...ticketCheckInView(scanned),
       });
     }
 
-    const updated = await db.query(
+    const approved = group.rows
+      .filter((item) => item.status === 'approved')
+      .sort((a, b) => {
+        const byTime =
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        if (byTime !== 0) return byTime;
+        return String(a.id).localeCompare(String(b.id));
+      });
+    const totals = purchaseCheckInTotals(approved);
+    const next = [
+      ...approved.filter((item) => item.id === ticketId),
+      ...approved.filter((item) => item.id !== ticketId),
+    ].find(
+      (item) => (Number(item.checked_in_count) || 0) < Number(item.quantity),
+    );
+    if (!next) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        ok: false,
+        reason: 'already_checked_in',
+        ...ticketCheckInView(latestCheckedInRow(approved, scanned)),
+        purchase_checked_in: totals.checkedIn,
+        purchase_quantity: totals.quantity,
+      });
+    }
+
+    const updated = await client.query(
       `UPDATE event_tickets
-       SET checked_in_at = CURRENT_TIMESTAMP
+       SET checked_in_count = checked_in_count + 1,
+           checked_in_at = COALESCE(checked_in_at, CURRENT_TIMESTAMP)
        WHERE id = $1
          AND status = 'approved'
-         AND checked_in_at IS NULL
+         AND checked_in_count < quantity
        RETURNING *`,
-      [ticketId],
+      [next.id],
     );
     if (updated.rowCount === 0) {
+      await client.query('ROLLBACK');
       return res.status(409).json({
         ok: false,
         reason: 'already_checked_in',
-        ...view,
+        ...ticketCheckInView(next),
+        purchase_checked_in: totals.checkedIn,
+        purchase_quantity: totals.quantity,
       });
     }
 
+    await client.query('COMMIT');
     res.json({
       ok: true,
       ticket: mapTicket(updated.rows[0]),
-      event_name: row.activity_name,
-      ticket_type_name: row.ticket_type_name,
+      event_name: next.activity_name,
+      ticket_type_name: next.ticket_type_name,
+      admitted_quantity: 1,
+      purchase_checked_in: totals.checkedIn + 1,
+      purchase_quantity: totals.quantity,
     });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error checking in ticket:', error);
     res.status(500).json({ error: 'Error al registrar el ingreso' });
+  } finally {
+    client.release();
   }
 });
 

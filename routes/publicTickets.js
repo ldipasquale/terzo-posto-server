@@ -287,14 +287,16 @@ router.post('/events/:slug/tickets', (req, res) => {
       }
 
       const ticketIds = [];
+      const purchaseId = newId();
       for (const line of pricedLines) {
         const ticketId = newId();
         ticketIds.push(ticketId);
         await client.query(
           `INSERT INTO event_tickets (
             id, rental_id, ticket_type_id, quantity, unit_price,
-            buyer_name, buyer_phone, buyer_email, receipt_file, status, purchase_date
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CURRENT_TIMESTAMP)`,
+            buyer_name, buyer_phone, buyer_email, receipt_file, status,
+            purchase_id, purchase_date
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, CURRENT_TIMESTAMP)`,
           [
             ticketId,
             rental.id,
@@ -306,6 +308,7 @@ router.post('/events/:slug/tickets', (req, res) => {
             buyerEmail,
             receiptFile,
             isFree ? 'approved' : 'pending',
+            purchaseId,
           ],
         );
       }
