@@ -72,6 +72,25 @@ function sanitizeExtraTask(raw) {
   };
 }
 
+const PURCHASE_ORIGINS = new Set([
+  "almacen",
+  "verduleria",
+  "carniceria",
+  "bebidas",
+  "otro",
+]);
+
+function sanitizeExtraPurchase(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const id = String(raw.id || "").trim();
+  const name = String(raw.name || "").trim().slice(0, 200);
+  const origin = String(raw.origin || "").trim();
+  const quantity = Number(raw.quantity);
+  if (!id || !name || !PURCHASE_ORIGINS.has(origin)) return null;
+  if (!Number.isFinite(quantity) || quantity <= 0) return null;
+  return { id, name, origin, quantity };
+}
+
 function sanitizeTaskOrder(value) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
@@ -99,6 +118,9 @@ function rowToPlan(row) {
     extraTasks: Array.isArray(row.extra_tasks)
       ? row.extra_tasks.map(sanitizeExtraTask).filter(Boolean)
       : [],
+    extraPurchases: Array.isArray(row.extra_purchases)
+      ? row.extra_purchases.map(sanitizeExtraPurchase).filter(Boolean)
+      : [],
     taskOrder: sanitizeTaskOrder(row.task_order),
   };
 }
@@ -106,7 +128,7 @@ function rowToPlan(row) {
 router.get("/", async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT user_id, step, plan_view, dishes, have_map, done_map, extra_tasks, task_order, updated_at
+      `SELECT user_id, step, plan_view, dishes, have_map, done_map, extra_tasks, extra_purchases, task_order, updated_at
        FROM production_plans
        WHERE user_id = $1`,
       [req.user.id],
@@ -135,11 +157,17 @@ router.put("/", async (req, res) => {
     const extraTasks = Array.isArray(req.body?.extraTasks)
       ? req.body.extraTasks.map(sanitizeExtraTask).filter(Boolean).slice(0, 50)
       : [];
+    const extraPurchases = Array.isArray(req.body?.extraPurchases)
+      ? req.body.extraPurchases
+          .map(sanitizeExtraPurchase)
+          .filter(Boolean)
+          .slice(0, 80)
+      : [];
     const taskOrder = sanitizeTaskOrder(req.body?.taskOrder);
 
     const result = await db.query(
-      `INSERT INTO production_plans (user_id, step, plan_view, dishes, have_map, done_map, extra_tasks, task_order, updated_at)
-       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, CURRENT_TIMESTAMP)
+      `INSERT INTO production_plans (user_id, step, plan_view, dishes, have_map, done_map, extra_tasks, extra_purchases, task_order, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, CURRENT_TIMESTAMP)
        ON CONFLICT (user_id) DO UPDATE SET
          step = EXCLUDED.step,
          plan_view = EXCLUDED.plan_view,
@@ -147,9 +175,10 @@ router.put("/", async (req, res) => {
          have_map = EXCLUDED.have_map,
          done_map = EXCLUDED.done_map,
          extra_tasks = EXCLUDED.extra_tasks,
+         extra_purchases = EXCLUDED.extra_purchases,
          task_order = EXCLUDED.task_order,
          updated_at = CURRENT_TIMESTAMP
-       RETURNING user_id, step, plan_view, dishes, have_map, done_map, extra_tasks, task_order, updated_at`,
+       RETURNING user_id, step, plan_view, dishes, have_map, done_map, extra_tasks, extra_purchases, task_order, updated_at`,
       [
         req.user.id,
         step,
@@ -158,6 +187,7 @@ router.put("/", async (req, res) => {
         JSON.stringify(haveMap),
         JSON.stringify(doneMap),
         JSON.stringify(extraTasks),
+        JSON.stringify(extraPurchases),
         JSON.stringify(taskOrder),
       ],
     );

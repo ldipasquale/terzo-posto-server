@@ -449,6 +449,10 @@ async function initDb() {
       `ALTER TABLE production_plans
        ADD COLUMN IF NOT EXISTS task_order JSONB NOT NULL DEFAULT '[]'::jsonb`,
     );
+    await client.query(
+      `ALTER TABLE production_plans
+       ADD COLUMN IF NOT EXISTS extra_purchases JSONB NOT NULL DEFAULT '[]'::jsonb`,
+    );
 
     // Migrations: add columns if missing (for existing DBs)
     const menuCols = await client.query(
