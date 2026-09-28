@@ -400,7 +400,7 @@ router.put('/todos/reorder', async (req, res) => {
         await client.query(
           `UPDATE directorio_todos
            SET position = $1
-           WHERE id = $2 AND done = FALSE`,
+           WHERE id = $2`,
           [i, String(orderedIds[i])],
         );
       }
