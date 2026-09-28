@@ -420,9 +420,26 @@ const CREATE_TABLES = `
     blocked_reason TEXT,
     note TEXT,
     meeting_id TEXT REFERENCES directorio_meetings(id) ON DELETE SET NULL,
+    event_id TEXT REFERENCES agenda_rentals(id) ON DELETE SET NULL,
     position INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS directorio_daily_meetings (
+    id TEXT PRIMARY KEY,
+    date DATE NOT NULL UNIQUE,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS directorio_open_issues (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    resolved BOOLEAN NOT NULL DEFAULT FALSE,
+    source_date DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
   CREATE TABLE IF NOT EXISTS directorio_manual_metrics (
@@ -1415,6 +1432,11 @@ async function initDb() {
     `);
 
     await client.query(`
+      ALTER TABLE directorio_todos
+      ADD COLUMN IF NOT EXISTS event_id TEXT REFERENCES agenda_rentals(id) ON DELETE SET NULL
+    `);
+
+    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_agenda_rentals_type ON agenda_rentals(type);
       CREATE INDEX IF NOT EXISTS idx_agenda_payments_rental_id ON agenda_payments(rental_id);
       CREATE INDEX IF NOT EXISTS idx_agenda_payments_paid_date ON agenda_payments(paid_date);
@@ -1433,6 +1455,7 @@ async function initDb() {
       CREATE INDEX IF NOT EXISTS idx_order_items_promotion_group_id ON order_items(promotion_group_id);
       CREATE INDEX IF NOT EXISTS idx_directorio_rocks_quarter ON directorio_rocks(quarter);
       CREATE INDEX IF NOT EXISTS idx_directorio_todos_meeting_id ON directorio_todos(meeting_id);
+      CREATE INDEX IF NOT EXISTS idx_directorio_todos_event_id ON directorio_todos(event_id);
       CREATE INDEX IF NOT EXISTS idx_directorio_todos_position ON directorio_todos(done, position);
       CREATE INDEX IF NOT EXISTS idx_directorio_meetings_date ON directorio_meetings(date);
       CREATE INDEX IF NOT EXISTS idx_directorio_manual_metrics_week ON directorio_manual_metrics(week_start);
