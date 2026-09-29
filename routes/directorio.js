@@ -6,7 +6,7 @@ const router = express.Router();
 
 const PARTNERS = ['Lucho', 'Bachi', 'Luli'];
 const ROCK_STATUSES = ['on-track', 'off-track'];
-const TODO_STATUSES = ['pending', 'blocked', 'future', 'done'];
+const TODO_STATUSES = ['pending', 'in_progress', 'blocked', 'future', 'done'];
 
 function normalizeTodoState(body, current) {
   const doneProvided = body?.done != null;
