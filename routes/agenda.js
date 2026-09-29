@@ -11,22 +11,28 @@ import {
   flyersDir,
   loadCatalog,
   loadTicketEmailContext,
-  mapTicket,
-  mapTicketsWithMenu,
   newId,
+  saveEventTicketPromos,
   receiptExtension,
-  soldByType,
+  ticketFaceAmount,
+  venueTicketCharge,
 } from '../lib/eventTickets.js';
-import {
-  fulfillTicketMenuOrderIfCajaOpen,
-  revertPendingTicketMenuOrder,
-  saveEventTicketMenuItems,
-  ticketMenuTotalSql,
-  ticketNetAmount,
-} from '../lib/ticketMenu.js';
-import { isValidEmail, sendTicketEmailForRow } from '../lib/ticketEmail.js';
+import { saveEventTicketMenuItems } from '../lib/ticketMenu.js';
+import { sendTicketEmailForRow } from '../lib/ticketEmail.js';
 import { resolveTicketTransferAccountId } from '../lib/ticketTransfer.js';
 import { getVenueLocation } from '../lib/venueLocation.js';
+import {
+  checkInTicket,
+  listEventTickets,
+  sellDoorTicket,
+  updateTicketStatus,
+} from '../lib/ticketOperations.js';
+import {
+  normalizeSharePassword,
+  readTicketShare,
+  saveTicketShare,
+  sharePasswordError,
+} from '../lib/ticketShare.js';
 
 const flyerUpload = multer({
   storage: multer.memoryStorage(),
@@ -146,6 +152,9 @@ const mapRental = (row) => ({
     row.room_insurance_price != null
       ? Number(row.room_insurance_price)
       : undefined,
+  ticketSalesClosedAt: row.ticket_sales_closed_at
+    ? new Date(row.ticket_sales_closed_at).toISOString()
+    : undefined,
   staffCount: row.staff_count != null ? Number(row.staff_count) : undefined,
   staffFood: row.staff_food || undefined,
   staffDrinks: row.staff_drinks || undefined,
@@ -192,56 +201,35 @@ function isTicketIncomeType(paymentType) {
   return paymentType === 'tickets' || paymentType === 'ticket_sales';
 }
 
-async function loadTicketSalesTotals(client, rentalId) {
+function rentalSharePercent(rental) {
+  return rental?.revenue_share_percent == null
+    ? 30
+    : Number(rental.revenue_share_percent);
+}
+
+async function loadVenueTicketCharge(client, rental) {
   const tickets = await client.query(
-    `SELECT quantity, unit_price, discount_amount, payment_method,
-            ${ticketMenuTotalSql('event_tickets.id')} AS menu_total
+    `SELECT quantity, unit_price, discount_amount
      FROM event_tickets
      WHERE rental_id = $1 AND status = 'approved'`,
-    [rentalId],
+    [rental.id],
   );
-  let cash = 0;
-  let cashQty = 0;
-  let mp = 0;
-  let mpQty = 0;
-  for (const row of tickets.rows) {
-    const amount = ticketNetAmount(row);
-    const qty = Number(row.quantity);
-    if (row.payment_method === 'efectivo') {
-      cash += amount;
-      cashQty += qty;
-    } else {
-      mp += amount;
-      mpQty += qty;
-    }
-  }
+  const sold = tickets.rows.reduce(
+    (sum, row) => sum + ticketFaceAmount(row),
+    0,
+  );
   const closed = await client.query(
-    `SELECT payment_method, COALESCE(SUM(amount), 0) AS amount
+    `SELECT COALESCE(SUM(amount), 0) AS amount
      FROM agenda_payments
-     WHERE rental_id = $1 AND payment_type = 'ticket_sales'
-     GROUP BY payment_method`,
-    [rentalId],
+     WHERE rental_id = $1 AND payment_type = 'ticket_sales'`,
+    [rental.id],
   );
-  let closedCash = 0;
-  let closedMp = 0;
-  for (const row of closed.rows) {
-    if (row.payment_method === 'efectivo') closedCash = Number(row.amount);
-    if (row.payment_method === 'mercadopago') closedMp = Number(row.amount);
-  }
-  cash = Math.round(cash);
-  mp = Math.round(mp);
-  closedCash = Math.round(closedCash);
-  closedMp = Math.round(closedMp);
-  return {
-    cash,
-    cashQty,
-    mp,
-    mpQty,
-    closedCash,
-    closedMp,
-    pendingCash: Math.max(0, cash - closedCash),
-    pendingMp: Math.max(0, mp - closedMp),
-  };
+  return venueTicketCharge({
+    sold,
+    percent: rentalSharePercent(rental),
+    roomInsurance: rental.room_insurance_price,
+    alreadyPaid: closed.rows[0]?.amount,
+  });
 }
 
 async function insertAgendaPaymentWithFinance(client, rental, p) {
@@ -840,62 +828,53 @@ router.get('/ticket-alerts', async (_req, res) => {
     );
 
     const approvedResult = await db.query(
-      `SELECT rental_id, quantity, unit_price, discount_amount, payment_method,
-              ${ticketMenuTotalSql('event_tickets.id')} AS menu_total
+      `SELECT rental_id, quantity, unit_price, discount_amount
        FROM event_tickets
        WHERE status = 'approved'`,
     );
     const closedResult = await db.query(
-      `SELECT rental_id, payment_method, amount
+      `SELECT rental_id, amount
        FROM agenda_payments
        WHERE payment_type = 'ticket_sales'`,
     );
-    const rentalIds = [
-      ...new Set(approvedResult.rows.map((row) => row.rental_id)),
-    ];
-    const rentalsResult =
-      rentalIds.length === 0
-        ? { rows: [] }
-        : await db.query(
-            `SELECT id, activity_name, responsible_name, date, start_time, end_time
-             FROM agenda_rentals
-             WHERE id = ANY($1::text[])`,
-            [rentalIds],
-          );
+    const rentalsResult = await db.query(
+      `SELECT id, activity_name, responsible_name, date, start_time, end_time,
+              revenue_share_percent, room_insurance_price
+       FROM agenda_rentals
+       WHERE ticket_sales_closed_at IS NULL
+         AND (
+           has_tickets = 1
+           OR id IN (
+             SELECT DISTINCT rental_id FROM event_tickets WHERE status = 'approved'
+           )
+         )`,
+    );
 
     const closedByRental = new Map();
     for (const row of closedResult.rows) {
-      const current = closedByRental.get(row.rental_id) || { cash: 0, mp: 0 };
-      const amount = Number(row.amount) || 0;
-      if (row.payment_method === 'efectivo') current.cash += amount;
-      if (row.payment_method === 'mercadopago') current.mp += amount;
-      closedByRental.set(row.rental_id, current);
+      closedByRental.set(
+        row.rental_id,
+        (closedByRental.get(row.rental_id) || 0) + (Number(row.amount) || 0),
+      );
     }
 
-    const ticketsByRental = new Map();
+    const soldByRental = new Map();
     for (const row of approvedResult.rows) {
-      const list = ticketsByRental.get(row.rental_id) || [];
-      list.push(row);
-      ticketsByRental.set(row.rental_id, list);
+      soldByRental.set(
+        row.rental_id,
+        (soldByRental.get(row.rental_id) || 0) + ticketFaceAmount(row),
+      );
     }
 
     const unclosedTicketSales = [];
     for (const rental of rentalsResult.rows) {
-      const tickets = ticketsByRental.get(rental.id) || [];
-      if (tickets.length === 0) continue;
-      let cash = 0;
-      let mp = 0;
-      for (const row of tickets) {
-        const amount = ticketNetAmount(row);
-        if (row.payment_method === 'efectivo') cash += amount;
-        else mp += amount;
-      }
-      cash = Math.round(cash);
-      mp = Math.round(mp);
-      const closed = closedByRental.get(rental.id) || { cash: 0, mp: 0 };
-      const pendingCash = Math.max(0, cash - Math.round(closed.cash));
-      const pendingMp = Math.max(0, mp - Math.round(closed.mp));
-      if (pendingCash <= 0 && pendingMp <= 0) continue;
+      const charge = venueTicketCharge({
+        sold: soldByRental.get(rental.id) || 0,
+        percent: rentalSharePercent(rental),
+        roomInsurance: rental.room_insurance_price,
+        alreadyPaid: closedByRental.get(rental.id) || 0,
+      });
+      if (charge.pending <= 0) continue;
       unclosedTicketSales.push({
         rentalId: rental.id,
         eventName: rental.activity_name,
@@ -903,8 +882,8 @@ router.get('/ticket-alerts', async (_req, res) => {
         startTime: rental.start_time || null,
         endTime: rental.end_time || null,
         responsibleName: rental.responsible_name || undefined,
-        pendingCash,
-        pendingMp,
+        pendingCash: charge.pending,
+        pendingMp: 0,
       });
     }
 
@@ -1061,6 +1040,9 @@ router.put('/rentals/:id/ticket-types', async (req, res) => {
         req.body.menu_items ?? req.body.menu_item_ids,
       );
     }
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'promos')) {
+      await saveEventTicketPromos(client, rentalId, req.body.promos);
+    }
     await ensureRentalSlug(client, {
       ...rental,
       has_tickets: incoming.length > 0 ? 1 : rental.has_tickets,
@@ -1074,29 +1056,50 @@ router.put('/rentals/:id/ticket-types', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Error saving ticket types:', error);
+    if (error.status === 400) {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: 'Error al guardar tipos de entrada' });
   } finally {
     client.release();
   }
 });
 
+router.get('/rentals/:id/ticket-share', async (req, res) => {
+  try {
+    const share = await readTicketShare(req.params.id);
+    if (!share) {
+      return res.status(404).json({ error: 'Evento no encontrado' });
+    }
+    res.json(share);
+  } catch (error) {
+    console.error('Error reading ticket share:', error);
+    res.status(500).json({ error: 'Error al obtener el link' });
+  }
+});
+
+router.put('/rentals/:id/ticket-share', async (req, res) => {
+  try {
+    const password = normalizeSharePassword(req.body?.password);
+    const passwordError = sharePasswordError(password);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
+    }
+    const share = await saveTicketShare(req.params.id, password);
+    if (!share) {
+      return res.status(404).json({ error: 'Evento no encontrado' });
+    }
+    res.json(share);
+  } catch (error) {
+    console.error('Error saving ticket share:', error);
+    res.status(500).json({ error: 'Error al generar el link' });
+  }
+});
+
 router.get('/rentals/:id/tickets', async (req, res) => {
   try {
     const status = String(req.query.status || 'all');
-    const params = [req.params.id];
-    let sql = `SELECT * FROM event_tickets WHERE rental_id = $1`;
-    if (['pending', 'approved', 'rejected'].includes(status)) {
-      sql += ' AND status = $2';
-      params.push(status);
-    } else if (status === 'checked_in') {
-      sql += ' AND checked_in_at IS NOT NULL';
-    }
-    sql +=
-      status === 'checked_in'
-        ? ' ORDER BY checked_in_at DESC'
-        : ' ORDER BY purchase_date DESC';
-    const result = await db.query(sql, params);
-    res.json(await mapTicketsWithMenu(db, result.rows));
+    res.json(await listEventTickets(req.params.id, status));
   } catch (error) {
     console.error('Error fetching event tickets:', error);
     res.status(500).json({ error: 'Error al obtener entradas' });
@@ -1104,133 +1107,52 @@ router.get('/rentals/:id/tickets', async (req, res) => {
 });
 
 router.post('/rentals/:id/tickets', async (req, res) => {
-  const client = await db.connect();
   try {
-    const rentalId = req.params.id;
-    const ticketTypeId = String(req.body?.ticket_type_id || '').trim();
-    const quantity = Number(req.body?.quantity);
-    const buyerName = String(req.body?.buyer_name || '').trim();
-    const buyerEmail = String(req.body?.buyer_email || '').trim().toLowerCase();
-    const paymentMethod = String(req.body?.payment_method || '');
-    const discountAmount = Math.max(0, Number(req.body?.discount_amount) || 0);
-
-    if (!ticketTypeId) {
-      return res.status(400).json({ error: 'Elegí el tipo de entrada' });
-    }
-    if (!Number.isInteger(quantity) || quantity < 1) {
-      return res.status(400).json({ error: 'Cantidad inválida' });
-    }
-    if (
-      paymentMethod &&
-      !['efectivo', 'mercadopago'].includes(paymentMethod)
-    ) {
-      return res.status(400).json({ error: 'Elegí el medio de pago' });
-    }
-    if (buyerEmail && !isValidEmail(buyerEmail)) {
-      return res.status(400).json({ error: 'Revisá el mail' });
-    }
-
-    await client.query('BEGIN');
-    const rentalResult = await client.query(
-      'SELECT * FROM agenda_rentals WHERE id = $1 FOR UPDATE',
-      [rentalId],
-    );
-    const rental = rentalResult.rows[0];
-    if (!rental || Number(rental.has_tickets) !== 1) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Evento no encontrado' });
-    }
-
-    const typeResult = await client.query(
-      `SELECT * FROM event_ticket_types
-       WHERE id = $1 AND rental_id = $2
-       FOR UPDATE`,
-      [ticketTypeId, rentalId],
-    );
-    const type = typeResult.rows[0];
-    if (!type) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Tipo de entrada no encontrado' });
-    }
-
-    const soldMap = await soldByType(client, rentalId);
-    const sold = soldMap.get(type.id) || 0;
-    const remaining = Math.max(0, Number(type.available_quantity) - sold);
-    if (quantity > remaining) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'No hay cupo suficiente para esa cantidad' });
-    }
-
-    const subtotal = Number(type.price) * quantity;
-    if (discountAmount > subtotal) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'El descuento no puede superar el total' });
-    }
-    const unitPrice = Number(type.price);
-    const isFree = Number.isFinite(unitPrice) && unitPrice <= 0;
-    if (!isFree && !['efectivo', 'mercadopago'].includes(paymentMethod)) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Elegí el medio de pago' });
-    }
-    const storedPayment = isFree ? null : paymentMethod;
-    const mpAccountId =
-      storedPayment === 'mercadopago'
-        ? await resolveTicketTransferAccountId(client, rental)
-        : null;
-
-    const ticketId = newId();
-    await client.query(
-      `INSERT INTO event_tickets (
-        id, rental_id, ticket_type_id, quantity, unit_price,
-        buyer_name, buyer_phone, buyer_email, receipt_file, status,
-        payment_method, mercado_pago_account_id, discount_amount, source,
-        purchase_id, purchase_date
-      ) VALUES (
-        $1,$2,$3,$4,$5,$6,'',$7,NULL,'approved',
-        $8,$9,$10,'door',$1, CURRENT_TIMESTAMP
-      )`,
-      [
-        ticketId,
-        rentalId,
-        type.id,
-        quantity,
-        unitPrice,
-        buyerName,
-        buyerEmail,
-        storedPayment,
-        mpAccountId,
-        isFree ? 0 : discountAmount,
-      ],
-    );
-    await client.query('COMMIT');
-
-    const created = await db.query('SELECT * FROM event_tickets WHERE id = $1', [
-      ticketId,
-    ]);
-    const [ticket] = await mapTicketsWithMenu(db, created.rows);
-    let emailSent = false;
-    if (buyerEmail) {
-      try {
-        const emailRow = await loadTicketEmailContext(db, ticketId);
-        emailSent = await sendTicketEmailForRow(
-          emailRow,
-          await getVenueLocation(db),
-        );
-      } catch (emailError) {
-        console.error('door ticket email:', emailError);
-      }
-    }
-    res.status(201).json({ ...ticket, email_sent: emailSent });
+    const result = await sellDoorTicket(req.params.id, req.body);
+    res.status(result.status).json(result.body);
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Error selling door ticket:', error);
     res.status(500).json({ error: 'Error al registrar la venta' });
-  } finally {
-    client.release();
   }
 });
 
+function closeAmount(value) {
+  const amount = Math.round(Number(value) || 0);
+  return Number.isFinite(amount) && amount > 0 ? amount : 0;
+}
+
+function parseClosePayments(body) {
+  const raw = Array.isArray(body?.payments) ? body.payments : [];
+  return raw.flatMap((item) => {
+    const amount = closeAmount(item?.amount);
+    if (amount <= 0) return [];
+    if (item?.payment_method === 'efectivo') {
+      return [{ paymentMethod: 'efectivo', amount, mercadoPagoAccountId: null }];
+    }
+    const accountId = String(item?.mercado_pago_account_id || '').trim();
+    if (!accountId) {
+      const error = new Error('Elegí la cuenta de Mercado Pago');
+      error.status = 400;
+      throw error;
+    }
+    return [{
+      paymentMethod: 'mercadopago',
+      amount,
+      mercadoPagoAccountId: accountId,
+    }];
+  });
+}
+
 router.post('/rentals/:id/ticket-sales/close', async (req, res) => {
+  let payments;
+  try {
+    payments = parseClosePayments(req.body);
+  } catch (error) {
+    return res.status(error.status || 400).json({
+      error: error.message || 'Revisá los medios de pago',
+    });
+  }
+
   const client = await db.connect();
   try {
     const rentalId = req.params.id;
@@ -1244,55 +1166,67 @@ router.post('/rentals/:id/ticket-sales/close', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Evento no encontrado' });
     }
-
-    const mpAccountId = await resolveTicketTransferAccountId(client, rental);
-    if (!mpAccountId) {
+    if (rental.ticket_sales_closed_at) {
       await client.query('ROLLBACK');
-      return res.status(400).json({
-        error: 'El alias de este evento no es una cuenta propia',
-      });
+      return res.status(409).json({ error: 'La venta de entradas ya está cerrada' });
     }
 
-    const totals = await loadTicketSalesTotals(client, rentalId);
-    if (totals.pendingCash <= 0 && totals.pendingMp <= 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ error: 'No hay ventas nuevas para registrar' });
+    const mpIds = [
+      ...new Set(
+        payments
+          .filter((payment) => payment.paymentMethod === 'mercadopago')
+          .map((payment) => payment.mercadoPagoAccountId),
+      ),
+    ];
+    if (mpIds.length > 0) {
+      const accounts = await client.query(
+        `SELECT id FROM mercado_pago_accounts
+         WHERE id = ANY($1::text[])
+           AND active = 1
+           AND COALESCE(kind, 'mercadopago') = 'mercadopago'`,
+        [mpIds],
+      );
+      if (accounts.rowCount !== mpIds.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'La cuenta de Mercado Pago no es válida' });
+      }
     }
 
+    const charge = await loadVenueTicketCharge(client, rental);
     const paidDate = new Date().toISOString();
-    const description = `Venta de entradas · ${rental.activity_name}`;
+    const description = `Cobro de entradas · ${rental.activity_name}`;
     const paymentIds = [];
-    if (totals.pendingCash > 0) {
+    for (const payment of payments) {
       paymentIds.push(
         await insertAgendaPaymentWithFinance(client, rental, {
-          amount: totals.pendingCash,
-          paymentMethod: 'efectivo',
+          amount: payment.amount,
+          paymentMethod: payment.paymentMethod,
+          mercadoPagoAccountId: payment.mercadoPagoAccountId,
           paymentType: 'ticket_sales',
           description,
           paidDate,
         }),
       );
     }
-    if (totals.pendingMp > 0) {
-      paymentIds.push(
-        await insertAgendaPaymentWithFinance(client, rental, {
-          amount: totals.pendingMp,
-          paymentMethod: 'mercadopago',
-          mercadoPagoAccountId: mpAccountId,
-          paymentType: 'ticket_sales',
-          description,
-          paidDate,
-        }),
-      );
-    }
+    await client.query(
+      `UPDATE agenda_rentals
+       SET ticket_sales_closed_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [rentalId],
+    );
     await client.query('COMMIT');
 
-    const created = await db.query(
-      `SELECT * FROM agenda_payments WHERE id = ANY($1::text[])`,
-      [paymentIds],
-    );
+    const created = paymentIds.length
+      ? await db.query(
+          'SELECT * FROM agenda_payments WHERE id = ANY($1::text[])',
+          [paymentIds],
+        )
+      : { rows: [] };
     res.status(201).json({
-      ...totals,
+      ...charge,
+      amount: payments.reduce((sum, payment) => sum + payment.amount, 0),
+      salesClosed: true,
       payments: created.rows.map(mapPayment),
     });
   } catch (error) {
@@ -1304,154 +1238,13 @@ router.post('/rentals/:id/ticket-sales/close', async (req, res) => {
   }
 });
 
-const TICKET_ID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function ticketCheckInView(row) {
-  return {
-    ticket: mapTicket(row),
-    event_name: row.activity_name,
-    ticket_type_name: row.ticket_type_name,
-  };
-}
-
-function purchaseCheckInTotals(rows) {
-  return rows.reduce(
-    (totals, item) => ({
-      quantity: totals.quantity + Number(item.quantity),
-      checkedIn: totals.checkedIn + (Number(item.checked_in_count) || 0),
-    }),
-    { quantity: 0, checkedIn: 0 },
-  );
-}
-
-function latestCheckedInRow(rows, fallback) {
-  return rows.reduce((best, item) => {
-    if (!item.checked_in_at) return best;
-    if (!best?.checked_in_at) return item;
-    return new Date(item.checked_in_at) > new Date(best.checked_in_at)
-      ? item
-      : best;
-  }, null) || fallback;
-}
-
 router.post('/tickets/check-in', async (req, res) => {
-  const client = await db.connect();
   try {
-    const ticketId = String(req.body?.ticket_id || '').trim();
-    if (!TICKET_ID_RE.test(ticketId)) {
-      return res.status(409).json({ ok: false, reason: 'invalid_code' });
-    }
-
-    await client.query('BEGIN');
-    const peek = await client.query(
-      `SELECT id, purchase_id, status
-       FROM event_tickets
-       WHERE id = $1`,
-      [ticketId],
-    );
-    const peeked = peek.rows[0];
-    if (!peeked) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, reason: 'not_found' });
-    }
-
-    const purchaseId = peeked.purchase_id || peeked.id;
-    const group = await client.query(
-      `SELECT t.*, r.activity_name, tt.name AS ticket_type_name
-       FROM event_tickets t
-       JOIN agenda_rentals r ON r.id = t.rental_id
-       JOIN event_ticket_types tt ON tt.id = t.ticket_type_id
-       WHERE t.purchase_id = $1 OR t.id = $2
-       ORDER BY t.id ASC
-       FOR UPDATE OF t`,
-      [purchaseId, ticketId],
-    );
-    const scanned = group.rows.find((item) => item.id === ticketId);
-    if (!scanned) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({ ok: false, reason: 'not_found' });
-    }
-    if (scanned.status === 'pending') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        ok: false,
-        reason: 'pending',
-        ...ticketCheckInView(scanned),
-      });
-    }
-    if (scanned.status === 'rejected') {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        ok: false,
-        reason: 'rejected',
-        ...ticketCheckInView(scanned),
-      });
-    }
-
-    const approved = group.rows
-      .filter((item) => item.status === 'approved')
-      .sort((a, b) => {
-        const byTime =
-          new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
-        if (byTime !== 0) return byTime;
-        return String(a.id).localeCompare(String(b.id));
-      });
-    const totals = purchaseCheckInTotals(approved);
-    const next = [
-      ...approved.filter((item) => item.id === ticketId),
-      ...approved.filter((item) => item.id !== ticketId),
-    ].find(
-      (item) => (Number(item.checked_in_count) || 0) < Number(item.quantity),
-    );
-    if (!next) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        ok: false,
-        reason: 'already_checked_in',
-        ...ticketCheckInView(latestCheckedInRow(approved, scanned)),
-        purchase_checked_in: totals.checkedIn,
-        purchase_quantity: totals.quantity,
-      });
-    }
-
-    const updated = await client.query(
-      `UPDATE event_tickets
-       SET checked_in_count = checked_in_count + 1,
-           checked_in_at = COALESCE(checked_in_at, CURRENT_TIMESTAMP)
-       WHERE id = $1
-         AND status = 'approved'
-         AND checked_in_count < quantity
-       RETURNING *`,
-      [next.id],
-    );
-    if (updated.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        ok: false,
-        reason: 'already_checked_in',
-        ...ticketCheckInView(next),
-        purchase_checked_in: totals.checkedIn,
-        purchase_quantity: totals.quantity,
-      });
-    }
-
-    await client.query('COMMIT');
-    res.json({
-      ok: true,
-      ticket: mapTicket(updated.rows[0]),
-      event_name: next.activity_name,
-      ticket_type_name: next.ticket_type_name,
-      admitted_quantity: 1,
-      purchase_checked_in: totals.checkedIn + 1,
-      purchase_quantity: totals.quantity,
-    });
+    const result = await checkInTicket(String(req.body?.ticket_id || '').trim());
+    res.status(result.status).json(result.body);
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Error checking in ticket:', error);
     res.status(500).json({ error: 'Error al registrar el ingreso' });
-  } finally {
-    client.release();
   }
 });
 
@@ -1522,35 +1315,15 @@ router.delete('/rentals/:id/flyer', async (req, res) => {
 });
 
 router.patch('/tickets/:id', async (req, res) => {
-  const client = await db.connect();
   try {
-    const status = String(req.body?.status || '');
-    if (!['pending', 'approved', 'rejected'].includes(status)) {
-      return res.status(400).json({ error: 'Estado inválido' });
-    }
-    await client.query('BEGIN');
-    const result = await client.query(
-      'UPDATE event_tickets SET status = $1 WHERE id = $2 RETURNING *',
-      [status, req.params.id],
+    const result = await updateTicketStatus(
+      req.params.id,
+      String(req.body?.status || ''),
     );
-    if (result.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Entrada no encontrada' });
-    }
-    if (status === 'approved') {
-      await fulfillTicketMenuOrderIfCajaOpen(client, req.params.id);
-    } else if (status === 'rejected') {
-      await revertPendingTicketMenuOrder(client, req.params.id);
-    }
-    await client.query('COMMIT');
-    const [ticket] = await mapTicketsWithMenu(db, result.rows);
-    res.json(ticket);
+    res.status(result.status).json(result.body);
   } catch (error) {
-    await client.query('ROLLBACK');
     console.error('Error updating ticket status:', error);
     res.status(500).json({ error: 'Error al actualizar la entrada' });
-  } finally {
-    client.release();
   }
 });
 

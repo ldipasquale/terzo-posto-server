@@ -9,10 +9,13 @@ import {
   isReceiptFileName,
   isPublicEventPast,
   isReasonableArPhone,
+  allocatePromoDiscount,
+  findEventTicketPromo,
   loadCatalog,
   loadTicketEmailContexts,
   mapTicketsWithMenu,
   newId,
+  promoDiscountAmount,
   phoneDigits,
   receiptExtension,
   receiptsDir,
@@ -119,6 +122,27 @@ router.get('/events/:slug', async (req, res) => {
   }
 });
 
+router.post('/events/:slug/promo', async (req, res) => {
+  try {
+    const rentalResult = await db.query(
+      'SELECT id FROM agenda_rentals WHERE slug = $1 AND has_tickets = 1',
+      [req.params.slug],
+    );
+    const rental = rentalResult.rows[0];
+    if (!rental) {
+      return res.status(404).json({ error: 'Evento no encontrado' });
+    }
+    const promo = await findEventTicketPromo(db, rental.id, req.body?.code);
+    if (!promo) {
+      return res.status(404).json({ error: 'Ese código no es válido' });
+    }
+    res.json({ code: promo.code, percent: promo.percent });
+  } catch (error) {
+    console.error('public promo:', error);
+    res.status(500).json({ error: 'No se pudo validar el código' });
+  }
+});
+
 router.post('/events/:slug/tickets/lookup', async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
@@ -204,7 +228,7 @@ router.post('/events/:slug/tickets', (req, res) => {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Evento no encontrado' });
       }
-      if (isPublicEventPast(rental.date)) {
+      if (rental.ticket_sales_closed_at || isPublicEventPast(rental.date)) {
         await client.query('ROLLBACK');
         return res.status(409).json({
           error: 'La venta de entradas para este evento ya cerró',
@@ -268,11 +292,27 @@ router.post('/events/:slug/tickets', (req, res) => {
       }
 
       const extrasTotal = resolvedMenu.total || 0;
+      const promoCode = String(req.body?.promo_code || '').trim();
+      let promo = null;
+      if (promoCode) {
+        promo = await findEventTicketPromo(client, rental.id, promoCode);
+        if (!promo) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Ese código no es válido' });
+        }
+      }
       const ticketsTotal = pricedLines.reduce(
         (sum, line) => sum + line.unitPrice * line.quantity,
         0,
       );
-      const grandTotal = ticketsTotal + extrasTotal;
+      const discount = promo
+        ? promoDiscountAmount(ticketsTotal, promo.percent)
+        : 0;
+      const discountShares = allocatePromoDiscount(
+        pricedLines.map((line) => line.unitPrice * line.quantity),
+        discount,
+      );
+      const grandTotal = ticketsTotal - discount + extrasTotal;
       const isFree = grandTotal <= 0;
       if (!isFree && !req.file) {
         await client.query('ROLLBACK');
@@ -288,21 +328,23 @@ router.post('/events/:slug/tickets', (req, res) => {
 
       const ticketIds = [];
       const purchaseId = newId();
-      for (const line of pricedLines) {
+      for (let index = 0; index < pricedLines.length; index += 1) {
+        const line = pricedLines[index];
         const ticketId = newId();
         ticketIds.push(ticketId);
         await client.query(
           `INSERT INTO event_tickets (
-            id, rental_id, ticket_type_id, quantity, unit_price,
+            id, rental_id, ticket_type_id, quantity, unit_price, discount_amount,
             buyer_name, buyer_phone, buyer_email, receipt_file, status,
             purchase_id, purchase_date
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, CURRENT_TIMESTAMP)`,
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, CURRENT_TIMESTAMP)`,
           [
             ticketId,
             rental.id,
             line.type.id,
             line.quantity,
             line.unitPrice,
+            discountShares[index] || 0,
             buyerName,
             buyerPhone,
             buyerEmail,

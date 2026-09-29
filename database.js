@@ -1082,6 +1082,9 @@ async function initDb() {
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS room_insurance_price DOUBLE PRECISION;
     `);
     await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS ticket_sales_closed_at TIMESTAMP;
+    `);
+    await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS staff_count INTEGER;
     `);
     await client.query(`
@@ -1116,6 +1119,15 @@ async function initDb() {
     `);
     await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS responsible_name TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS ticket_share_token TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS ticket_share_password_hash TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS ticket_share_version INTEGER NOT NULL DEFAULT 0;
     `);
     await client.query(`
       ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS buyer_email TEXT;
@@ -1199,6 +1211,21 @@ async function initDb() {
       ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS discount_amount DOUBLE PRECISION NOT NULL DEFAULT 0;
     `);
     await client.query(`
+      CREATE TABLE IF NOT EXISTS event_ticket_promos (
+        id TEXT PRIMARY KEY,
+        rental_id TEXT NOT NULL,
+        code TEXT NOT NULL,
+        percent INTEGER NOT NULL CHECK (percent >= 1 AND percent <= 100),
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (rental_id) REFERENCES agenda_rentals (id) ON DELETE CASCADE
+      )
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_event_ticket_promos_code
+      ON event_ticket_promos (rental_id, lower(code))
+    `);
+    await client.query(`
       ALTER TABLE event_tickets ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'online';
     `);
     await client.query(`
@@ -1223,6 +1250,11 @@ async function initDb() {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_agenda_rentals_slug
       ON agenda_rentals (slug)
       WHERE slug IS NOT NULL
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_agenda_rentals_ticket_share_token
+      ON agenda_rentals (ticket_share_token)
+      WHERE ticket_share_token IS NOT NULL
     `);
     await client.query(`
       CREATE TABLE IF NOT EXISTS event_ticket_types (

@@ -11,7 +11,7 @@ export const authenticateToken = (req, res, next) => {
   }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
+    if (err || user?.scope === 'ticket-share') {
       return res.status(401).json({ error: 'Token inválido o expirado' });
     }
     req.user = user;
