@@ -17,7 +17,12 @@ import {
   ticketFaceAmount,
   venueTicketCharge,
 } from '../lib/eventTickets.js';
-import { saveEventTicketMenuItems } from '../lib/ticketMenu.js';
+import {
+  loadTicketCloseWeights,
+  saveEventTicketMenuItems,
+  splitTicketCloseAmount,
+  weightsForTicketPayment,
+} from '../lib/ticketMenu.js';
 import { sendTicketEmailForRow } from '../lib/ticketEmail.js';
 import { resolveTicketTransferAccountId } from '../lib/ticketTransfer.js';
 import { getVenueLocation } from '../lib/venueLocation.js';
@@ -234,7 +239,6 @@ async function loadVenueTicketCharge(client, rental) {
 
 async function insertAgendaPaymentWithFinance(client, rental, p) {
   const paymentId = crypto.randomUUID();
-  const txId = crypto.randomUUID();
   const paidDate = p.paidDate || new Date().toISOString();
   const isTickets = isTicketIncomeType(p.paymentType);
 
@@ -267,23 +271,40 @@ async function insertAgendaPaymentWithFinance(client, rental, p) {
       ? FINANCE_AREA_CATEGORY.eventRental
       : FINANCE_AREA_CATEGORY.workshopRental;
   const eventId = rental.type === 'one-off' ? rental.id : null;
+  const accountId = getFinanceAccountId(p.paymentMethod, p.mercadoPagoAccountId);
+  const slices = Array.isArray(p.financeSlices) && p.financeSlices.length
+    ? p.financeSlices
+    : [{
+        amount: Number(p.amount),
+        description: txDescription,
+        area: txAreaCat.area,
+        category: txAreaCat.category,
+        referenceId: paymentId,
+      }];
 
-  await client.query(
-    `INSERT INTO finance_transactions
-    (id, account_id, type, amount, description, source, area, category, reference_id, event_id, date)
-    VALUES ($1,$2,'income',$3,$4,'agenda',$5,$6,$7,$8,$9)`,
-    [
-      txId,
-      getFinanceAccountId(p.paymentMethod, p.mercadoPagoAccountId),
-      Number(p.amount),
-      txDescription,
-      txAreaCat.area,
-      txAreaCat.category,
-      paymentId,
-      eventId,
-      paidDate,
-    ],
-  );
+  for (const slice of slices) {
+    const sliceAmount = Number(slice.amount);
+    if (!Number.isFinite(sliceAmount) || sliceAmount <= 0) continue;
+    const referenceId = slice.referenceKind
+      ? `ticket-menu:${paymentId}:${slice.referenceKind}`
+      : slice.referenceId || paymentId;
+    await client.query(
+      `INSERT INTO finance_transactions
+      (id, account_id, type, amount, description, source, area, category, reference_id, event_id, date)
+      VALUES ($1,$2,'income',$3,$4,'agenda',$5,$6,$7,$8,$9)`,
+      [
+        crypto.randomUUID(),
+        accountId,
+        sliceAmount,
+        slice.description,
+        slice.area,
+        slice.category,
+        referenceId,
+        eventId,
+        paidDate,
+      ],
+    );
+  }
   return paymentId;
 }
 
@@ -786,7 +807,12 @@ router.delete('/payments/:id', async (req, res) => {
   try {
     await client.query('BEGIN');
     await client.query(
-      "DELETE FROM finance_transactions WHERE source = 'agenda' AND reference_id = $1",
+      `DELETE FROM finance_transactions
+       WHERE source = 'agenda'
+         AND (
+           reference_id = $1
+           OR reference_id LIKE 'ticket-menu:' || $1 || ':%'
+         )`,
       [req.params.id],
     );
     const result = await client.query(
@@ -1194,17 +1220,64 @@ router.post('/rentals/:id/ticket-sales/close', async (req, res) => {
 
     const charge = await loadVenueTicketCharge(client, rental);
     const paidDate = new Date().toISOString();
-    const description = `Cobro de entradas · ${rental.activity_name}`;
+    const ticketDescription = `Cobro de entradas · ${rental.activity_name}`;
+    // Con el 100% el club cobra entrada y menú: se parte el ingreso.
+    // Con otro porcentaje el cobro es solo la parte de las entradas.
+    const closeWeights = rentalSharePercent(rental) === 100
+      ? await loadTicketCloseWeights(client, rental.id)
+      : null;
     const paymentIds = [];
     for (const payment of payments) {
+      const parts = closeWeights
+        ? splitTicketCloseAmount(
+            payment.amount,
+            weightsForTicketPayment(closeWeights, payment),
+          )
+        : { entradas: payment.amount, comida: 0, bebida: 0 };
+      const slices = [];
+      if (parts.entradas > 0) {
+        slices.push({
+          amount: parts.entradas,
+          description: ticketDescription,
+          area: FINANCE_AREA_CATEGORY.eventTickets.area,
+          category: FINANCE_AREA_CATEGORY.eventTickets.category,
+          referenceId: null,
+        });
+      }
+      if (parts.comida > 0) {
+        slices.push({
+          amount: parts.comida,
+          description: `Venta de comida · ${rental.activity_name}`,
+          area: FINANCE_AREA_CATEGORY.buffetFoodIncome.area,
+          category: FINANCE_AREA_CATEGORY.buffetFoodIncome.category,
+          referenceKind: 'comida',
+        });
+      }
+      if (parts.bebida > 0) {
+        slices.push({
+          amount: parts.bebida,
+          description: `Venta de bebida · ${rental.activity_name}`,
+          area: FINANCE_AREA_CATEGORY.buffetDrinkIncome.area,
+          category: FINANCE_AREA_CATEGORY.buffetDrinkIncome.category,
+          referenceKind: 'bebida',
+        });
+      }
       paymentIds.push(
         await insertAgendaPaymentWithFinance(client, rental, {
           amount: payment.amount,
           paymentMethod: payment.paymentMethod,
           mercadoPagoAccountId: payment.mercadoPagoAccountId,
           paymentType: 'ticket_sales',
-          description,
+          description:
+            parts.entradas > 0
+              ? ticketDescription
+              : parts.comida > 0 && parts.bebida > 0
+                ? `Venta de comida y bebida · ${rental.activity_name}`
+                : parts.bebida > 0
+                  ? `Venta de bebida · ${rental.activity_name}`
+                  : `Venta de comida · ${rental.activity_name}`,
           paidDate,
+          financeSlices: slices,
         }),
       );
     }
