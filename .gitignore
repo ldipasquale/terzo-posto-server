@@ -8,3 +8,8 @@ user-photos/
 backups/
 BACKUP.md
 scripts/
+arca-*.key
+arca-*.crt
+arca-*.csr
+.arca/
+.nvmrc

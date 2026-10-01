@@ -6,7 +6,19 @@ import {
   canLinkEventToArea,
   isValidAreaCategory,
 } from '../lib/financeAreas.js';
-import { listInvoiceItems, setInvoiceMark } from '../lib/financeInvoices.js';
+import {
+  invoiceIssuers,
+  listIssuerActivities,
+  parseReceiverTaxId,
+  partnerFromName,
+} from '../lib/arcaInvoice.js';
+import {
+  issueInvoiceItem,
+  listInvoiceItems,
+  previewBlankInvoice,
+  previewInvoiceItem,
+  setInvoiceMark,
+} from '../lib/financeInvoices.js';
 
 const router = express.Router();
 
@@ -85,6 +97,64 @@ router.get('/invoices', async (_req, res) => {
   } catch (error) {
     console.error('Error fetching invoices:', error);
     res.status(500).json({ error: 'Error al obtener facturas' });
+  }
+});
+
+router.get('/invoices/issuers', (_req, res) => {
+  res.json(invoiceIssuers());
+});
+
+router.get('/invoices/activities', async (req, res) => {
+  try {
+    const partner = partnerFromName(req.user?.name);
+    if (!partner) {
+      return res.status(403).json({ error: 'Solo un socio puede facturar' });
+    }
+    const activities = await listIssuerActivities(partner);
+    res.json(activities);
+  } catch (error) {
+    console.error('Error listing invoice activities:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : 'Error al obtener actividades',
+    });
+  }
+});
+
+router.post('/invoices/preview', async (req, res) => {
+  try {
+    const sourceKey = String(req.body?.sourceKey || '').trim();
+    const receiverTaxId = parseReceiverTaxId(req.body?.receiverTaxId);
+    const preview = sourceKey
+      ? await previewInvoiceItem(db, sourceKey, req.user?.name, receiverTaxId)
+      : await previewBlankInvoice(req.user?.name, receiverTaxId);
+    res.json(preview);
+  } catch (error) {
+    console.error('Error previewing invoice:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : 'Error al previsualizar la factura',
+    });
+  }
+});
+
+router.post('/invoices/issue', async (req, res) => {
+  try {
+    const sourceKey = String(req.body?.sourceKey || '').trim();
+    if (!sourceKey) {
+      return res.status(400).json({ error: 'Datos inválidos' });
+    }
+    const receiverTaxId = parseReceiverTaxId(req.body?.receiverTaxId);
+    const item = await issueInvoiceItem(db, sourceKey, req.user?.name, receiverTaxId, {
+      description: req.body?.description,
+      amount: req.body?.amount,
+      activityId: req.body?.activityId,
+      email: req.body?.email,
+    });
+    res.json(item);
+  } catch (error) {
+    console.error('Error issuing invoice:', error);
+    res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : 'Error al emitir la factura',
+    });
   }
 });
 

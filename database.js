@@ -1377,6 +1377,48 @@ async function initDb() {
     await client.query(`
       ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS archived SMALLINT NOT NULL DEFAULT 0;
     `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS cae TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS cae_expiry TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS voucher_number INTEGER;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS voucher_type INTEGER;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS sales_point INTEGER;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS qr TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS issued_amount DOUBLE PRECISION;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS issued_description TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS issued_date TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS receiver_tax_id TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS receiver_name TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS receiver_vat_condition TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS receiver_email TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS partner TEXT;
+    `);
 
     await client.query(`
       ALTER TABLE finance_transactions ADD COLUMN IF NOT EXISTS event_id TEXT
