@@ -152,6 +152,7 @@ const CREATE_TABLES = `
     yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
     origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
     requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE,
+    instructions TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -937,6 +938,7 @@ async function initDb() {
           yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
           origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
           requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE,
+          instructions TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -957,6 +959,12 @@ async function initDb() {
       await client.query(`
         ALTER TABLE supplies
         ADD COLUMN IF NOT EXISTS requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE
+      `);
+    }
+    if (!supplyColNames.includes('instructions')) {
+      await client.query(`
+        ALTER TABLE supplies
+        ADD COLUMN IF NOT EXISTS instructions TEXT
       `);
     }
 

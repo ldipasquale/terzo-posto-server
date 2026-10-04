@@ -15,6 +15,20 @@ function parseOrigin(type, origin) {
   return value;
 }
 
+const MAX_INSTRUCTIONS = 4000;
+
+function parseInstructions(value) {
+  if (value == null || value === '') return { text: null };
+  const text = String(value).replace(/\r\n/g, '\n').trim();
+  if (!text) return { text: null };
+  if (text.length > MAX_INSTRUCTIONS) {
+    return {
+      error: `Las instrucciones no pueden superar ${MAX_INSTRUCTIONS} caracteres`,
+    };
+  }
+  return { text };
+}
+
 function parseRequiresElaboration(type, value, fallback = true) {
   if (type !== 'composed') return true;
   if (value === false || value === 0 || value === 'false' || value === '0') return false;
@@ -88,6 +102,10 @@ function rowToSupply(row, latestPurchaseMap = {}, costInfo = null) {
     yieldUnit: row.yield_unit ?? undefined,
     requiresElaboration:
       row.type === 'composed' ? row.requires_elaboration !== false : undefined,
+    instructions:
+      typeof row.instructions === 'string' && row.instructions.trim()
+        ? row.instructions.trim()
+        : undefined,
     lastPurchaseQuantity:
       latest?.presentationQuantity == null
         ? undefined
@@ -170,7 +188,7 @@ router.get('/', async (req, res) => {
   try {
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const result = await db.query(`
-      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
+      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions, created_at, updated_at
       FROM supplies
       ORDER BY name
     `);
@@ -200,7 +218,7 @@ router.get('/:id', async (req, res) => {
   try {
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const all = await db.query(`
-      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
+      SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions, created_at, updated_at
       FROM supplies
     `);
     const suppliesById = {};
@@ -288,6 +306,10 @@ router.post('/', async (req, res) => {
     const yieldAmountVal = type === 'composed' && yieldAmount != null ? Number(yieldAmount) : null;
     const yieldUnitVal = type === 'composed' && yieldUnit ? yieldUnit : null;
     const requiresElaborationVal = parseRequiresElaboration(type, requiresElaboration);
+    const instructionsParsed = parseInstructions(req.body.instructions);
+    if (instructionsParsed.error) {
+      return res.status(400).json({ error: instructionsParsed.error });
+    }
 
     // Cycle check
     const recipeArrForCandidate =
@@ -306,7 +328,7 @@ router.post('/', async (req, res) => {
       yield_unit: yieldUnitVal,
     };
     const allRows = await db.query(
-      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration FROM supplies',
+      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions FROM supplies',
     );
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
@@ -324,8 +346,8 @@ router.post('/', async (req, res) => {
     }
 
     await db.query(
-      `INSERT INTO supplies (id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      `INSERT INTO supplies (id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         supplyId,
         name,
@@ -338,12 +360,13 @@ router.post('/', async (req, res) => {
         yieldAmountVal,
         yieldUnitVal,
         requiresElaborationVal,
+        instructionsParsed.text,
       ],
     );
 
     const row = (
       await db.query(
-        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
+        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions, created_at, updated_at
          FROM supplies WHERE id = $1`,
         [supplyId],
       )
@@ -398,7 +421,7 @@ router.put('/:id', async (req, res) => {
     }
 
     const existingRes = await db.query(
-      `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration
+      `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions
        FROM supplies WHERE id = $1`,
       [id],
     );
@@ -456,6 +479,14 @@ router.put('/:id', async (req, res) => {
       requiresElaboration,
       existing.requires_elaboration !== false,
     );
+    const instructionsParsed = parseInstructions(
+      Object.prototype.hasOwnProperty.call(req.body, 'instructions')
+        ? req.body.instructions
+        : existing.instructions,
+    );
+    if (instructionsParsed.error) {
+      return res.status(400).json({ error: instructionsParsed.error });
+    }
 
     const recipeArrForCandidate =
       type === 'composed' && Array.isArray(recipe)
@@ -473,7 +504,7 @@ router.put('/:id', async (req, res) => {
       yield_unit: yieldUnitVal,
     };
     const allRows = await db.query(
-      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration FROM supplies',
+      'SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions FROM supplies',
     );
     const latestPurchaseMap = await getLatestPurchasedValuesMap(db);
     const suppliesById = {};
@@ -492,8 +523,8 @@ router.put('/:id', async (req, res) => {
 
     const result = await db.query(
       `UPDATE supplies
-       SET name = $1, type = $2, unit = $3, origin = $4, purchase_price = $5, purchase_quantity = $6, recipe = $7, yield_amount = $8, yield_unit = $9, requires_elaboration = $10, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $11`,
+       SET name = $1, type = $2, unit = $3, origin = $4, purchase_price = $5, purchase_quantity = $6, recipe = $7, yield_amount = $8, yield_unit = $9, requires_elaboration = $10, instructions = $11, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $12`,
       [
         name,
         type,
@@ -505,6 +536,7 @@ router.put('/:id', async (req, res) => {
         yieldAmountVal,
         yieldUnitVal,
         requiresElaborationVal,
+        instructionsParsed.text,
         id,
       ],
     );
@@ -522,7 +554,7 @@ router.put('/:id', async (req, res) => {
 
     const row = (
       await db.query(
-        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, created_at, updated_at
+        `SELECT id, name, type, unit, origin, purchase_price, purchase_quantity, recipe, yield_amount, yield_unit, requires_elaboration, instructions, created_at, updated_at
          FROM supplies WHERE id = $1`,
         [id],
       )
