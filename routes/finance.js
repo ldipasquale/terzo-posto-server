@@ -1,6 +1,16 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import express from 'express';
+import multer from 'multer';
 import db from '../database.js';
+import {
+  ensureFixedExpenseReceiptsDir,
+  fixedExpenseReceiptsDir,
+  isReceiptFileName,
+  newId,
+  receiptExtension,
+} from '../lib/eventTickets.js';
 import {
   FINANCE_AREA_CATEGORY,
   canLinkEventToArea,
@@ -23,6 +33,29 @@ import {
 const router = express.Router();
 
 const PARTNERS = ['Lucho', 'Bachi', 'Luli'];
+const RECEIPT_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+
+const receiptUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!RECEIPT_MIMES.includes(file.mimetype)) {
+      cb(new Error('Solo se permiten imágenes JPEG, PNG o WebP'));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
+function removeReceiptFile(fileName) {
+  if (!fileName || !isReceiptFileName(fileName)) return;
+  const filePath = path.join(fixedExpenseReceiptsDir(), fileName);
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch (error) {
+    console.error('Error deleting fixed expense receipt:', error);
+  }
+}
 
 function parseResponsibleName(value) {
   if (value == null) return null;
@@ -74,6 +107,9 @@ const mapFixedExpensePayment = (row) => ({
   amount: Number(row.amount),
   accountId: row.account_id,
   paidDate: new Date(row.paid_date).toISOString(),
+  receiptUrl: row.receipt_file
+    ? `/api/finance/fixed-expense-payments/${row.id}/receipt`
+    : null,
 });
 
 router.get('/accounts', async (_req, res) => {
@@ -545,8 +581,13 @@ router.put('/fixed-expenses/:id', async (req, res) => {
 
 router.delete('/fixed-expenses/:id', async (req, res) => {
   try {
+    const payments = await db.query(
+      'SELECT receipt_file FROM finance_fixed_expense_payments WHERE fixed_expense_id = $1',
+      [req.params.id],
+    );
     const result = await db.query('DELETE FROM finance_fixed_expenses WHERE id = $1', [req.params.id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
+    for (const row of payments.rows) removeReceiptFile(row.receipt_file);
     res.status(204).send();
   } catch (error) {
     console.error('Error deleting fixed expense:', error);
@@ -566,76 +607,125 @@ router.get('/fixed-expense-payments', async (_req, res) => {
   }
 });
 
-router.post('/fixed-expense-payments', async (req, res) => {
+router.get('/fixed-expense-payments/:id/receipt', async (req, res) => {
   try {
-    const p = req.body;
-    if (!p?.fixedExpenseId || !p?.month || Number(p.amount) <= 0 || !p?.accountId) {
-      return res.status(400).json({ error: 'Datos inválidos de pago' });
+    const result = await db.query(
+      'SELECT receipt_file FROM finance_fixed_expense_payments WHERE id = $1',
+      [req.params.id],
+    );
+    const fileName = result.rows[0]?.receipt_file;
+    if (!fileName || !isReceiptFileName(fileName)) {
+      return res.status(404).json({ error: 'Comprobante no encontrado' });
     }
-    const accountId = normalizeAccountId(p.accountId);
-    try {
-      await assertLiquidityAccountExists(accountId);
-    } catch (e) {
-      if (e.statusCode === 400) return res.status(400).json({ error: e.message });
-      throw e;
+    const filePath = path.join(fixedExpenseReceiptsDir(), fileName);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Comprobante no encontrado' });
     }
-
-    const expenseRes = await db.query(
-      'SELECT id, name FROM finance_fixed_expenses WHERE id = $1',
-      [p.fixedExpenseId],
-    );
-    const expense = expenseRes.rows[0];
-    if (!expense) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
-
-    const client = await db.connect();
-    const id = crypto.randomUUID();
-    const txId = crypto.randomUUID();
-    const paidDate = p.paidDate || new Date().toISOString();
-    try {
-    await client.query('BEGIN');
-    await client.query(
-      `INSERT INTO finance_fixed_expense_payments
-      (id, fixed_expense_id, month, amount, account_id, paid_date)
-      VALUES ($1,$2,$3,$4,$5,$6)`,
-      [id, p.fixedExpenseId, p.month, Number(p.amount), accountId, paidDate],
-    );
-    await client.query(
-      `INSERT INTO finance_transactions
-      (id, account_id, type, amount, description, source, area, category, reference_id, date)
-      VALUES ($1,$2,'expense',$3,$4,'fixed-expense',$5,$6,$7,$8)`,
-      [
-        txId,
-        accountId,
-        Number(p.amount),
-        `${expense.name} — ${p.month}`,
-        FINANCE_AREA_CATEGORY.fixedExpense.area,
-        FINANCE_AREA_CATEGORY.fixedExpense.category,
-        id,
-        paidDate,
-      ],
-    );
-    await client.query('COMMIT');
-    const created = await db.query(
-      'SELECT * FROM finance_fixed_expense_payments WHERE id = $1',
-      [id],
-    );
-    res.status(201).json(mapFixedExpensePayment(created.rows[0]));
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
+    res.sendFile(filePath);
   } catch (error) {
-    console.error('Error creating fixed expense payment:', error);
-    res.status(500).json({ error: 'Error al registrar pago' });
+    console.error('Error fetching fixed expense receipt:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Error al obtener el comprobante' });
+    }
   }
+});
+
+router.post('/fixed-expense-payments', (req, res) => {
+  receiptUpload.single('receipt')(req, res, async (err) => {
+    if (err) {
+      const message = err.code === 'LIMIT_FILE_SIZE'
+        ? 'El comprobante no puede superar 8 MB'
+        : err.message || 'Comprobante inválido';
+      return res.status(400).json({ error: message });
+    }
+    if (!req.file?.size) {
+      return res.status(400).json({ error: 'Subí el comprobante' });
+    }
+
+    let receiptFile = null;
+    try {
+      const p = req.body;
+      if (!p?.fixedExpenseId || !p?.month || Number(p.amount) <= 0 || !p?.accountId) {
+        return res.status(400).json({ error: 'Datos inválidos de pago' });
+      }
+      const accountId = normalizeAccountId(p.accountId);
+      try {
+        await assertLiquidityAccountExists(accountId);
+      } catch (e) {
+        if (e.statusCode === 400) return res.status(400).json({ error: e.message });
+        throw e;
+      }
+
+      const expenseRes = await db.query(
+        'SELECT id, name FROM finance_fixed_expenses WHERE id = $1',
+        [p.fixedExpenseId],
+      );
+      const expense = expenseRes.rows[0];
+      if (!expense) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
+
+      const dir = ensureFixedExpenseReceiptsDir();
+      receiptFile = `${newId()}.${receiptExtension(req.file.mimetype)}`;
+      fs.writeFileSync(path.join(dir, receiptFile), req.file.buffer);
+
+      const client = await db.connect();
+      const id = crypto.randomUUID();
+      const txId = crypto.randomUUID();
+      const paidDate = p.paidDate || new Date().toISOString();
+      try {
+        await client.query('BEGIN');
+        await client.query(
+          `INSERT INTO finance_fixed_expense_payments
+          (id, fixed_expense_id, month, amount, account_id, paid_date, receipt_file)
+          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [id, p.fixedExpenseId, p.month, Number(p.amount), accountId, paidDate, receiptFile],
+        );
+        await client.query(
+          `INSERT INTO finance_transactions
+          (id, account_id, type, amount, description, source, area, category, reference_id, date)
+          VALUES ($1,$2,'expense',$3,$4,'fixed-expense',$5,$6,$7,$8)`,
+          [
+            txId,
+            accountId,
+            Number(p.amount),
+            `${expense.name} — ${p.month}`,
+            FINANCE_AREA_CATEGORY.fixedExpense.area,
+            FINANCE_AREA_CATEGORY.fixedExpense.category,
+            id,
+            paidDate,
+          ],
+        );
+        await client.query('COMMIT');
+        const created = await db.query(
+          'SELECT * FROM finance_fixed_expense_payments WHERE id = $1',
+          [id],
+        );
+        res.status(201).json(mapFixedExpensePayment(created.rows[0]));
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      removeReceiptFile(receiptFile);
+      console.error('Error creating fixed expense payment:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error al registrar pago' });
+      }
+    }
+  });
 });
 
 router.delete('/fixed-expense-payments/:id', async (req, res) => {
   const client = await db.connect();
+  let receiptFile = null;
   try {
     await client.query('BEGIN');
+    const existing = await client.query(
+      'SELECT receipt_file FROM finance_fixed_expense_payments WHERE id = $1',
+      [req.params.id],
+    );
+    receiptFile = existing.rows[0]?.receipt_file || null;
     await client.query(
       "DELETE FROM finance_transactions WHERE source = 'fixed-expense' AND reference_id = $1",
       [req.params.id],
@@ -649,6 +739,7 @@ router.delete('/fixed-expense-payments/:id', async (req, res) => {
       return res.status(404).json({ error: 'Pago no encontrado' });
     }
     await client.query('COMMIT');
+    removeReceiptFile(receiptFile);
     res.status(204).send();
   } catch (error) {
     await client.query('ROLLBACK');

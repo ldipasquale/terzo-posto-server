@@ -182,6 +182,57 @@ function formatOpeningChecklist(raw) {
   return normalized.record ?? undefined;
 }
 
+function parseMpOpeningBalances(raw, activeIds, selectedAccountId) {
+  if (!Array.isArray(raw)) {
+    return { error: "Hay que cargar el saldo inicial de cada cuenta de Mercado Pago" };
+  }
+  if (activeIds.length === 0) {
+    return { error: "No hay cuentas de Mercado Pago activas" };
+  }
+  const byId = new Map();
+  for (const item of raw) {
+    const accountId = item?.accountId;
+    const startingBalance = Number(item?.startingBalance);
+    if (typeof accountId !== "string" || !accountId) {
+      return { error: "Hay que cargar el saldo inicial de cada cuenta de Mercado Pago" };
+    }
+    if (byId.has(accountId)) {
+      return { error: "Hay una cuenta de Mercado Pago repetida" };
+    }
+    if (!Number.isFinite(startingBalance) || startingBalance < 0) {
+      return { error: "El saldo inicial tiene que ser un número mayor o igual a 0" };
+    }
+    byId.set(accountId, startingBalance);
+  }
+  const missing = activeIds.filter((id) => !byId.has(id));
+  const extra = [...byId.keys()].filter((id) => !activeIds.includes(id));
+  if (missing.length > 0 || extra.length > 0) {
+    return { error: "Hay que cargar el saldo inicial de cada cuenta activa" };
+  }
+  if (!byId.has(selectedAccountId)) {
+    return { error: "Elegí la cuenta de Mercado Pago del día" };
+  }
+  return {
+    balances: activeIds.map((accountId) => ({
+      accountId,
+      startingBalance: byId.get(accountId),
+    })),
+    selectedBalance: byId.get(selectedAccountId),
+  };
+}
+
+function formatMpOpeningBalances(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const balances = raw.flatMap((item) => {
+    const startingBalance = Number(item?.startingBalance);
+    if (typeof item?.accountId !== "string" || !Number.isFinite(startingBalance)) {
+      return [];
+    }
+    return [{ accountId: item.accountId, startingBalance }];
+  });
+  return balances.length > 0 ? balances : undefined;
+}
+
 function formatCashRegister(row) {
   return {
     id: row.id,
@@ -194,6 +245,7 @@ function formatCashRegister(row) {
       row.mp_starting_balance != null && Number.isFinite(Number(row.mp_starting_balance))
         ? Number(row.mp_starting_balance)
         : undefined,
+    mpOpeningBalances: formatMpOpeningBalances(row.mp_opening_balances),
     status: row.status,
     closedAt: row.closed_at ? new Date(row.closed_at).toISOString() : undefined,
     closingData: row.closing_data || undefined,
@@ -268,15 +320,19 @@ router.post("/", async (req, res) => {
       eventName,
       startingCash,
       mpStartingBalance,
+      mpOpeningBalances,
       openingChecklist,
     } = req.body;
     if (!mercadoPagoAccountId) {
-      return res.status(400).json({ error: "Cuenta de Mercado Pago es requerida" });
+      return res.status(400).json({ error: "Elegí la cuenta de Mercado Pago del día" });
     }
     if (mercadoPagoAccountId === "efectivo") {
       return res.status(400).json({
         error: "La caja debe asociarse a una cuenta de Mercado Pago (no efectivo)",
       });
+    }
+    if (!eventName || !String(eventName).trim()) {
+      return res.status(400).json({ error: "El evento es requerido" });
     }
 
     const existing = await db.query(
@@ -286,12 +342,32 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Ya hay una caja abierta" });
     }
 
-    let mpStartingBalanceDb = null;
+    const cashNumber = Number(startingCash);
+    if (startingCash == null || startingCash === "" || !Number.isFinite(cashNumber) || cashNumber < 0) {
+      return res.status(400).json({
+        error: "El cambio inicial es requerido",
+      });
+    }
+
+    const activeAccounts = await db.query(
+      `SELECT id FROM mercado_pago_accounts
+       WHERE id != 'efectivo'
+         AND COALESCE(kind, 'mercadopago') = 'mercadopago'
+         AND active = 1
+       ORDER BY holder, alias`,
+    );
+    const activeIds = activeAccounts.rows.map((row) => row.id);
+    const parsedOpening = parseMpOpeningBalances(mpOpeningBalances, activeIds, mercadoPagoAccountId);
+    if (parsedOpening.error) {
+      return res.status(400).json({ error: parsedOpening.error });
+    }
+
+    let mpStartingBalanceDb = parsedOpening.selectedBalance;
     if (mpStartingBalance != null && mpStartingBalance !== "") {
       const n = Number(mpStartingBalance);
-      if (!Number.isFinite(n) || n < 0) {
+      if (!Number.isFinite(n) || n < 0 || Math.abs(n - parsedOpening.selectedBalance) > 0.001) {
         return res.status(400).json({
-          error: "mpStartingBalance debe ser un número mayor o igual a 0",
+          error: "El saldo de la cuenta del día no coincide",
         });
       }
       mpStartingBalanceDb = n;
@@ -312,16 +388,17 @@ router.post("/", async (req, res) => {
     try {
       await client.query("BEGIN");
       await client.query(
-        `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, status, opening_checklist)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)`,
+        `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, mp_opening_balances, status, opening_checklist)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9)`,
         [
           id,
           date,
           mercadoPagoAccountId,
           eventId || null,
-          eventName || null,
-          startingCash ?? null,
+          String(eventName).trim(),
+          cashNumber,
           mpStartingBalanceDb,
+          JSON.stringify(parsedOpening.balances),
           normalizedChecklist.record
             ? JSON.stringify(normalizedChecklist.record)
             : null,

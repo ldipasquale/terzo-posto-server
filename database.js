@@ -348,6 +348,7 @@ const CREATE_TABLES = `
     amount DOUBLE PRECISION NOT NULL,
     account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
     paid_date TIMESTAMP NOT NULL,
+    receipt_file TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -972,6 +973,8 @@ async function initDb() {
           event_id TEXT,
           event_name TEXT,
           starting_cash DOUBLE PRECISION,
+          mp_starting_balance DOUBLE PRECISION,
+          mp_opening_balances JSONB,
           status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           closed_at TIMESTAMP,
@@ -995,6 +998,11 @@ async function initDb() {
     if (!cashRegisterColNames.includes('mp_starting_balance')) {
       await client.query(
         'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS mp_starting_balance DOUBLE PRECISION',
+      );
+    }
+    if (!cashRegisterColNames.includes('mp_opening_balances')) {
+      await client.query(
+        'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS mp_opening_balances JSONB',
       );
     }
     if (!cashRegisterColNames.includes('opening_checklist')) {
@@ -1372,6 +1380,10 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE finance_fixed_expenses ADD COLUMN IF NOT EXISTS responsible_name TEXT;
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_fixed_expense_payments ADD COLUMN IF NOT EXISTS receipt_file TEXT;
     `);
 
     await client.query(`
