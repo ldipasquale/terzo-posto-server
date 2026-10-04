@@ -132,6 +132,23 @@ const mapFixedExpense = (row) => ({
   createdAt: new Date(row.created_at).toISOString(),
 });
 
+async function syncFixedExpenseAmount(client, expenseId) {
+  await client.query(
+    `UPDATE finance_fixed_expenses AS expense
+     SET amount = latest.amount,
+         updated_at = CURRENT_TIMESTAMP
+     FROM (
+       SELECT amount
+       FROM finance_fixed_expense_payments
+       WHERE fixed_expense_id = $1
+       ORDER BY paid_date DESC, id DESC
+       LIMIT 1
+     ) AS latest
+     WHERE expense.id = $1`,
+    [expenseId],
+  );
+}
+
 const mapFixedExpensePayment = (row) => ({
   id: row.id,
   fixedExpenseId: row.fixed_expense_id,
@@ -750,9 +767,10 @@ router.post('/fixed-expense-payments', (req, res) => {
             FINANCE_AREA_CATEGORY.fixedExpense.area,
             FINANCE_AREA_CATEGORY.fixedExpense.category,
             id,
-            paidDate,
-          ],
+          paidDate,
+        ],
         );
+        await syncFixedExpenseAmount(client, p.fixedExpenseId);
         await client.query('COMMIT');
         const created = await db.query(
           'SELECT * FROM finance_fixed_expense_payments WHERE id = $1',
@@ -781,10 +799,11 @@ router.delete('/fixed-expense-payments/:id', async (req, res) => {
   try {
     await client.query('BEGIN');
     const existing = await client.query(
-      'SELECT receipt_file FROM finance_fixed_expense_payments WHERE id = $1',
+      'SELECT fixed_expense_id, receipt_file FROM finance_fixed_expense_payments WHERE id = $1',
       [req.params.id],
     );
     receiptFile = existing.rows[0]?.receipt_file || null;
+    const expenseId = existing.rows[0]?.fixed_expense_id || null;
     await client.query(
       "DELETE FROM finance_transactions WHERE source = 'fixed-expense' AND reference_id = $1",
       [req.params.id],
@@ -797,6 +816,7 @@ router.delete('/fixed-expense-payments/:id', async (req, res) => {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Pago no encontrado' });
     }
+    if (expenseId) await syncFixedExpenseAmount(client, expenseId);
     await client.query('COMMIT');
     removeReceiptFile(receiptFile);
     res.status(204).send();
