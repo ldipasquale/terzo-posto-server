@@ -89,11 +89,43 @@ const mapTransaction = (row) => ({
   createdAt: new Date(row.created_at).toISOString(),
 });
 
+const FIXED_EXPENSE_FREQUENCIES = new Set([
+  'monthly',
+  'bimonthly',
+  'semiannual',
+  'annual',
+]);
+
+function parseFixedExpenseSchedule(body, required) {
+  if (!required && body.frequency == null && body.anchorMonth == null) {
+    return null;
+  }
+  if (!required && body.frequency == null) {
+    return { error: 'Frecuencia inválida' };
+  }
+  const frequency = body.frequency == null || body.frequency === ''
+    ? 'monthly'
+    : String(body.frequency);
+  if (!FIXED_EXPENSE_FREQUENCIES.has(frequency)) {
+    return { error: 'Frecuencia inválida' };
+  }
+  if (frequency === 'monthly') {
+    return { frequency, anchorMonth: null };
+  }
+  const anchorMonth = Number(body.anchorMonth);
+  if (!Number.isInteger(anchorMonth) || anchorMonth < 1 || anchorMonth > 12) {
+    return { error: 'Elegí el mes de vencimiento' };
+  }
+  return { frequency, anchorMonth };
+}
+
 const mapFixedExpense = (row) => ({
   id: row.id,
   name: row.name,
   amount: Number(row.amount),
   dueDay: Number(row.due_day),
+  frequency: row.frequency || 'monthly',
+  anchorMonth: row.anchor_month == null ? undefined : Number(row.anchor_month),
   notes: row.notes || undefined,
   responsibleName: row.responsible_name || undefined,
   active: Boolean(row.active),
@@ -517,6 +549,10 @@ router.post('/fixed-expenses', async (req, res) => {
     if (!e?.name || Number(e.amount) <= 0 || Number(e.dueDay) < 1 || Number(e.dueDay) > 31) {
       return res.status(400).json({ error: 'Datos inválidos de gasto fijo' });
     }
+    const schedule = parseFixedExpenseSchedule(e, true);
+    if (schedule.error) {
+      return res.status(400).json({ error: schedule.error });
+    }
     const responsibleParsed = parseResponsibleName(e.responsibleName);
     if (responsibleParsed === undefined) {
       return res.status(400).json({ error: 'Responsable inválido' });
@@ -524,9 +560,20 @@ router.post('/fixed-expenses', async (req, res) => {
     const responsibleName = responsibleParsed || null;
     const id = crypto.randomUUID();
     await db.query(
-      `INSERT INTO finance_fixed_expenses (id, name, amount, due_day, notes, responsible_name, active)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [id, String(e.name).trim(), Number(e.amount), Number(e.dueDay), e.notes ?? null, responsibleName, e.active === false ? 0 : 1],
+      `INSERT INTO finance_fixed_expenses
+        (id, name, amount, due_day, frequency, anchor_month, notes, responsible_name, active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [
+        id,
+        String(e.name).trim(),
+        Number(e.amount),
+        Number(e.dueDay),
+        schedule.frequency,
+        schedule.anchorMonth,
+        e.notes ?? null,
+        responsibleName,
+        e.active === false ? 0 : 1,
+      ],
     );
     const created = await db.query('SELECT * FROM finance_fixed_expenses WHERE id = $1', [id]);
     res.status(201).json(mapFixedExpense(created.rows[0]));
@@ -547,6 +594,10 @@ router.put('/fixed-expenses/:id', async (req, res) => {
       }
       responsibleNameArg = parsed;
     }
+    const schedule = parseFixedExpenseSchedule(e, false);
+    if (schedule?.error) {
+      return res.status(400).json({ error: schedule.error });
+    }
     const result = await db.query(
       `UPDATE finance_fixed_expenses SET
          name = COALESCE($1, name),
@@ -558,6 +609,12 @@ router.put('/fixed-expenses/:id', async (req, res) => {
            ELSE NULLIF(BTRIM($5), '')
          END,
          active = COALESCE($6, active),
+         frequency = COALESCE($8, frequency),
+         anchor_month = CASE
+           WHEN $8::text = 'monthly' THEN NULL
+           WHEN $8::text IS NOT NULL THEN $9
+           ELSE anchor_month
+         END,
          updated_at = CURRENT_TIMESTAMP
        WHERE id = $7`,
       [
@@ -568,6 +625,8 @@ router.put('/fixed-expenses/:id', async (req, res) => {
         responsibleNameArg,
         e.active == null ? null : e.active ? 1 : 0,
         req.params.id,
+        schedule?.frequency ?? null,
+        schedule?.anchorMonth ?? null,
       ],
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Gasto fijo no encontrado' });

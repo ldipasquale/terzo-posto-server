@@ -334,6 +334,8 @@ const CREATE_TABLES = `
     name TEXT NOT NULL,
     amount DOUBLE PRECISION NOT NULL,
     due_day INTEGER NOT NULL CHECK (due_day BETWEEN 1 AND 31),
+    frequency TEXT NOT NULL DEFAULT 'monthly',
+    anchor_month INTEGER,
     notes TEXT,
     responsible_name TEXT,
     active SMALLINT NOT NULL DEFAULT 1,
@@ -1380,6 +1382,39 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE finance_fixed_expenses ADD COLUMN IF NOT EXISTS responsible_name TEXT;
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses
+      ADD COLUMN IF NOT EXISTS frequency TEXT NOT NULL DEFAULT 'monthly';
+    `);
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses
+      ADD COLUMN IF NOT EXISTS anchor_month INTEGER;
+    `);
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses
+      DROP CONSTRAINT IF EXISTS finance_fixed_expenses_frequency_check;
+    `);
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses
+      ADD CONSTRAINT finance_fixed_expenses_frequency_check
+      CHECK (frequency IN ('monthly', 'bimonthly', 'semiannual', 'annual'));
+    `);
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses
+      DROP CONSTRAINT IF EXISTS finance_fixed_expenses_schedule_check;
+    `);
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses
+      ADD CONSTRAINT finance_fixed_expenses_schedule_check
+      CHECK (
+        (frequency = 'monthly' AND anchor_month IS NULL)
+        OR (
+          frequency IN ('bimonthly', 'semiannual', 'annual')
+          AND anchor_month BETWEEN 1 AND 12
+        )
+      );
     `);
 
     await client.query(`
