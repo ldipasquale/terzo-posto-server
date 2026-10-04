@@ -5,7 +5,21 @@ import db from '../database.js';
 const router = express.Router();
 
 const MENU_ITEM_COLUMNS =
-  'id, name, description, price, category, type, available, popular, portions, recipe, production_steps, archived, requires_kitchen';
+  'id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen';
+
+const MAX_INSTRUCTIONS = 50000;
+
+function parseInstructions(value) {
+  if (value == null || value === '') return { text: null };
+  const text = String(value).replace(/\r\n/g, '\n').trim();
+  if (!text) return { text: null };
+  if (text.length > MAX_INSTRUCTIONS) {
+    return {
+      error: `Las instrucciones no pueden superar ${MAX_INSTRUCTIONS} caracteres`,
+    };
+  }
+  return { text };
+}
 
 const MAX_PRODUCTION_STEPS = 30;
 const MAX_PRODUCTION_STEP_TEXT = 200;
@@ -86,6 +100,10 @@ function formatMenuItem(item) {
     portions: item.portions != null ? item.portions : 1,
     recipe: normalizeMenuRecipe(parseRecipe(item.recipe)),
     productionSteps: normalizeProductionSteps(item.production_steps),
+    instructions:
+      typeof item.instructions === 'string' && item.instructions.trim()
+        ? item.instructions.trim()
+        : undefined,
     archived: Boolean(item.archived),
     requiresKitchen:
       item.type === 'comida' &&
@@ -152,6 +170,7 @@ router.post('/', async (req, res) => {
       portions,
       recipe,
       productionSteps,
+      instructions,
       archived,
       requiresKitchen: requiresKitchenBody,
     } = req.body;
@@ -173,14 +192,18 @@ router.post('/', async (req, res) => {
     const productionStepsJson = JSON.stringify(
       normalizeProductionSteps(productionSteps),
     );
+    const instructionsParsed = parseInstructions(instructions);
+    if (instructionsParsed.error) {
+      return res.status(400).json({ error: instructionsParsed.error });
+    }
     const portionsNum =
       typeof portions === 'number' && portions >= 1 ? portions : 1;
     const requiresKitchen =
       type === 'comida' ? (requiresKitchenBody === false ? 0 : 1) : 0;
 
     await db.query(
-      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, production_steps, archived, requires_kitchen)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
         id,
         name,
@@ -193,6 +216,7 @@ router.post('/', async (req, res) => {
         portionsNum,
         recipeJson,
         productionStepsJson,
+        instructionsParsed.text,
         archived ? 1 : 0,
         requiresKitchen,
       ],
@@ -276,6 +300,15 @@ router.put('/:id', async (req, res) => {
       );
     }
 
+    const instructionsParsed = parseInstructions(
+      Object.prototype.hasOwnProperty.call(body, 'instructions')
+        ? body.instructions
+        : existing.instructions,
+    );
+    if (instructionsParsed.error) {
+      return res.status(400).json({ error: instructionsParsed.error });
+    }
+
     let portionsNum = existing.portions != null ? existing.portions : 1;
     if (body.portions !== undefined) {
       portionsNum =
@@ -294,9 +327,9 @@ router.put('/:id', async (req, res) => {
       `UPDATE menu_items
        SET name = $1, description = $2, price = $3, category = $4, type = $5,
            available = $6, popular = $7, portions = $8, recipe = $9,
-           production_steps = $10, archived = $11,
-           requires_kitchen = $12, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $13`,
+           production_steps = $10, instructions = $11, archived = $12,
+           requires_kitchen = $13, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $14`,
       [
         name,
         description,
@@ -308,6 +341,7 @@ router.put('/:id', async (req, res) => {
         portionsNum,
         recipeJson,
         productionStepsJson,
+        instructionsParsed.text,
         archived,
         requiresKitchen,
         req.params.id,

@@ -15,7 +15,7 @@ function parseOrigin(type, origin) {
   return value;
 }
 
-const MAX_INSTRUCTIONS = 4000;
+const MAX_INSTRUCTIONS = 50000;
 
 function parseInstructions(value) {
   if (value == null || value === '') return { text: null };

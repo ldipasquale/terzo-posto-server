@@ -27,6 +27,7 @@ const CREATE_TABLES = `
     portions INTEGER NOT NULL DEFAULT 1,
     recipe TEXT NOT NULL DEFAULT '[]',
     production_steps TEXT NOT NULL DEFAULT '[]',
+    instructions TEXT,
     archived SMALLINT NOT NULL DEFAULT 0,
     requires_kitchen SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -503,6 +504,11 @@ async function initDb() {
     if (!menuColNames.includes('requires_kitchen')) {
       await client.query(
         'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS requires_kitchen SMALLINT NOT NULL DEFAULT 1',
+      );
+    }
+    if (!menuColNames.includes('instructions')) {
+      await client.query(
+        'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS instructions TEXT',
       );
     }
 
