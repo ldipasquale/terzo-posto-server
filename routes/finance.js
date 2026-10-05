@@ -47,6 +47,11 @@ const receiptUpload = multer({
   },
 });
 
+const paymentFilesUpload = receiptUpload.fields([
+  { name: 'receipt', maxCount: 1 },
+  { name: 'certificate', maxCount: 1 },
+]);
+
 function removeReceiptFile(fileName) {
   if (!fileName || !isReceiptFileName(fileName)) return;
   const filePath = path.join(fixedExpenseReceiptsDir(), fileName);
@@ -158,6 +163,9 @@ const mapFixedExpensePayment = (row) => ({
   paidDate: new Date(row.paid_date).toISOString(),
   receiptUrl: row.receipt_file
     ? `/api/finance/fixed-expense-payments/${row.id}/receipt`
+    : null,
+  certificateUrl: row.certificate_file
+    ? `/api/finance/fixed-expense-payments/${row.id}/certificate`
     : null,
 });
 
@@ -658,12 +666,15 @@ router.put('/fixed-expenses/:id', async (req, res) => {
 router.delete('/fixed-expenses/:id', async (req, res) => {
   try {
     const payments = await db.query(
-      'SELECT receipt_file FROM finance_fixed_expense_payments WHERE fixed_expense_id = $1',
+      'SELECT receipt_file, certificate_file FROM finance_fixed_expense_payments WHERE fixed_expense_id = $1',
       [req.params.id],
     );
     const result = await db.query('DELETE FROM finance_fixed_expenses WHERE id = $1', [req.params.id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
-    for (const row of payments.rows) removeReceiptFile(row.receipt_file);
+    for (const row of payments.rows) {
+      removeReceiptFile(row.receipt_file);
+      removeReceiptFile(row.certificate_file);
+    }
     res.status(204).send();
   } catch (error) {
     console.error('Error deleting fixed expense:', error);
@@ -683,42 +694,61 @@ router.get('/fixed-expense-payments', async (_req, res) => {
   }
 });
 
+async function sendFixedExpensePaymentFile(req, res, column) {
+  const label = column === 'certificate_file' ? 'certificado' : 'comprobante de pago';
+  const result = await db.query(
+    `SELECT ${column} FROM finance_fixed_expense_payments WHERE id = $1`,
+    [req.params.id],
+  );
+  const fileName = result.rows[0]?.[column];
+  if (!fileName || !isReceiptFileName(fileName)) {
+    return res.status(404).json({ error: `No se encontró el ${label}` });
+  }
+  const filePath = path.join(fixedExpenseReceiptsDir(), fileName);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: `No se encontró el ${label}` });
+  }
+  res.sendFile(filePath);
+}
+
 router.get('/fixed-expense-payments/:id/receipt', async (req, res) => {
   try {
-    const result = await db.query(
-      'SELECT receipt_file FROM finance_fixed_expense_payments WHERE id = $1',
-      [req.params.id],
-    );
-    const fileName = result.rows[0]?.receipt_file;
-    if (!fileName || !isReceiptFileName(fileName)) {
-      return res.status(404).json({ error: 'Comprobante no encontrado' });
-    }
-    const filePath = path.join(fixedExpenseReceiptsDir(), fileName);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: 'Comprobante no encontrado' });
-    }
-    res.sendFile(filePath);
+    await sendFixedExpensePaymentFile(req, res, 'receipt_file');
   } catch (error) {
     console.error('Error fetching fixed expense receipt:', error);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Error al obtener el comprobante' });
+      res.status(500).json({ error: 'Error al obtener el comprobante de pago' });
+    }
+  }
+});
+
+router.get('/fixed-expense-payments/:id/certificate', async (req, res) => {
+  try {
+    await sendFixedExpensePaymentFile(req, res, 'certificate_file');
+  } catch (error) {
+    console.error('Error fetching fixed expense certificate:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Error al obtener el certificado' });
     }
   }
 });
 
 router.post('/fixed-expense-payments', (req, res) => {
-  receiptUpload.single('receipt')(req, res, async (err) => {
+  paymentFilesUpload(req, res, async (err) => {
     if (err) {
       const message = err.code === 'LIMIT_FILE_SIZE'
-        ? 'El comprobante no puede superar 8 MB'
-        : err.message || 'Comprobante inválido';
+        ? 'El archivo no puede superar 8 MB'
+        : err.message || 'Archivo inválido';
       return res.status(400).json({ error: message });
     }
-    if (!req.file?.size) {
-      return res.status(400).json({ error: 'Subí el comprobante' });
+    const receipt = req.files?.receipt?.[0];
+    const certificate = req.files?.certificate?.[0];
+    if (!receipt?.size) {
+      return res.status(400).json({ error: 'Subí el comprobante de pago' });
     }
 
     let receiptFile = null;
+    let certificateFile = null;
     try {
       const p = req.body;
       if (!p?.fixedExpenseId || !p?.month || Number(p.amount) <= 0 || !p?.accountId) {
@@ -740,8 +770,12 @@ router.post('/fixed-expense-payments', (req, res) => {
       if (!expense) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
 
       const dir = ensureFixedExpenseReceiptsDir();
-      receiptFile = `${newId()}.${receiptExtension(req.file.mimetype)}`;
-      fs.writeFileSync(path.join(dir, receiptFile), req.file.buffer);
+      receiptFile = `${newId()}.${receiptExtension(receipt.mimetype)}`;
+      fs.writeFileSync(path.join(dir, receiptFile), receipt.buffer);
+      if (certificate?.size) {
+        certificateFile = `${newId()}.${receiptExtension(certificate.mimetype)}`;
+        fs.writeFileSync(path.join(dir, certificateFile), certificate.buffer);
+      }
 
       const client = await db.connect();
       const id = crypto.randomUUID();
@@ -751,9 +785,18 @@ router.post('/fixed-expense-payments', (req, res) => {
         await client.query('BEGIN');
         await client.query(
           `INSERT INTO finance_fixed_expense_payments
-          (id, fixed_expense_id, month, amount, account_id, paid_date, receipt_file)
-          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [id, p.fixedExpenseId, p.month, Number(p.amount), accountId, paidDate, receiptFile],
+          (id, fixed_expense_id, month, amount, account_id, paid_date, receipt_file, certificate_file)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          [
+            id,
+            p.fixedExpenseId,
+            p.month,
+            Number(p.amount),
+            accountId,
+            paidDate,
+            receiptFile,
+            certificateFile,
+          ],
         );
         await client.query(
           `INSERT INTO finance_transactions
@@ -785,6 +828,7 @@ router.post('/fixed-expense-payments', (req, res) => {
       }
     } catch (error) {
       removeReceiptFile(receiptFile);
+      removeReceiptFile(certificateFile);
       console.error('Error creating fixed expense payment:', error);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Error al registrar pago' });
@@ -796,13 +840,15 @@ router.post('/fixed-expense-payments', (req, res) => {
 router.delete('/fixed-expense-payments/:id', async (req, res) => {
   const client = await db.connect();
   let receiptFile = null;
+  let certificateFile = null;
   try {
     await client.query('BEGIN');
     const existing = await client.query(
-      'SELECT fixed_expense_id, receipt_file FROM finance_fixed_expense_payments WHERE id = $1',
+      'SELECT fixed_expense_id, receipt_file, certificate_file FROM finance_fixed_expense_payments WHERE id = $1',
       [req.params.id],
     );
     receiptFile = existing.rows[0]?.receipt_file || null;
+    certificateFile = existing.rows[0]?.certificate_file || null;
     const expenseId = existing.rows[0]?.fixed_expense_id || null;
     await client.query(
       "DELETE FROM finance_transactions WHERE source = 'fixed-expense' AND reference_id = $1",
@@ -819,6 +865,7 @@ router.delete('/fixed-expense-payments/:id', async (req, res) => {
     if (expenseId) await syncFixedExpenseAmount(client, expenseId);
     await client.query('COMMIT');
     removeReceiptFile(receiptFile);
+    removeReceiptFile(certificateFile);
     res.status(204).send();
   } catch (error) {
     await client.query('ROLLBACK');

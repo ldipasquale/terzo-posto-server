@@ -16,6 +16,7 @@ import promotionsRoutes from './routes/promotions.js';
 import usersRoutes from './routes/users.js';
 import directorioRoutes from './routes/directorio.js';
 import instagramRoutes from './routes/instagram.js';
+import socialPostsRoutes from './routes/socialPosts.js';
 import publicTicketsRoutes from './routes/publicTickets.js';
 import ticketShareRoutes from './routes/ticketShare.js';
 import productionPlanRoutes from './routes/productionPlan.js';
@@ -113,6 +114,7 @@ app.use(
 );
 app.use('/api/directorio', authenticateToken, directorioRoutes);
 app.use('/api/instagram', authenticateToken, instagramRoutes);
+app.use('/api/social-posts', authenticateToken, socialPostsRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {

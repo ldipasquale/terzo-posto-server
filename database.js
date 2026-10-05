@@ -353,6 +353,7 @@ const CREATE_TABLES = `
     account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
     paid_date TIMESTAMP NOT NULL,
     receipt_file TEXT,
+    certificate_file TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -456,12 +457,52 @@ const CREATE_TABLES = `
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (metric_id, week_start)
   );
+
+  CREATE TABLE IF NOT EXISTS social_posts (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    publish_date DATE NOT NULL,
+    publish_time TEXT,
+    network TEXT NOT NULL DEFAULT 'instagram',
+    format TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'idea',
+    tasks JSONB NOT NULL DEFAULT '[]'::jsonb,
+    copy_text TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS social_posts_publish_date_idx
+    ON social_posts (publish_date);
 `;
 
 async function initDb() {
   const client = await pool.connect();
   try {
     await client.query(CREATE_TABLES);
+
+    await client.query(
+      `ALTER TABLE directorio_todos
+       ADD COLUMN IF NOT EXISTS social_post_id TEXT REFERENCES social_posts(id) ON DELETE CASCADE`,
+    );
+    await client.query(
+      `CREATE INDEX IF NOT EXISTS directorio_todos_social_post_id_idx
+       ON directorio_todos (social_post_id)`,
+    );
+    await client.query(
+      `UPDATE social_posts
+       SET status = 'idea'
+       WHERE status IN ('in_production', 'ready')`,
+    );
+    await client.query(
+      `ALTER TABLE social_posts
+       ADD COLUMN IF NOT EXISTS series_id TEXT`,
+    );
+    await client.query(
+      `CREATE INDEX IF NOT EXISTS social_posts_series_id_idx
+       ON social_posts (series_id)`,
+    );
 
     await client.query(
       `ALTER TABLE production_plans
@@ -1433,6 +1474,9 @@ async function initDb() {
 
     await client.query(`
       ALTER TABLE finance_fixed_expense_payments ADD COLUMN IF NOT EXISTS receipt_file TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE finance_fixed_expense_payments ADD COLUMN IF NOT EXISTS certificate_file TEXT;
     `);
 
     await client.query(`

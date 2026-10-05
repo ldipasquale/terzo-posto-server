@@ -75,9 +75,10 @@ function mapRock(row) {
 }
 
 const TODO_SELECT = `
-  SELECT t.*, r.activity_name AS event_name
+  SELECT t.*, r.activity_name AS event_name, sp.title AS social_post_title
   FROM directorio_todos t
   LEFT JOIN agenda_rentals r ON r.id = t.event_id
+  LEFT JOIN social_posts sp ON sp.id = t.social_post_id
 `;
 
 function mapTodo(row) {
@@ -94,6 +95,8 @@ function mapTodo(row) {
     meetingId: row.meeting_id || undefined,
     eventId: row.event_id || undefined,
     eventName: row.event_name || undefined,
+    socialPostId: row.social_post_id || undefined,
+    socialPostTitle: row.social_post_title || undefined,
     position: Number(row.position ?? 0),
     createdAt: new Date(row.created_at).toISOString(),
     completedAt: row.completed_at
@@ -105,6 +108,16 @@ function mapTodo(row) {
 async function loadTodo(id) {
   const result = await db.query(`${TODO_SELECT} WHERE t.id = $1`, [id]);
   return result.rows[0];
+}
+
+async function resolveSocialPostId(raw) {
+  if (raw == null || raw === '') return { socialPostId: null };
+  const socialPostId = String(raw);
+  const found = await db.query('SELECT id FROM social_posts WHERE id = $1', [
+    socialPostId,
+  ]);
+  if (found.rows.length === 0) return { error: 'Publicación no encontrada' };
+  return { socialPostId };
 }
 
 async function resolveEventId(raw) {
@@ -361,10 +374,14 @@ router.post('/todos', async (req, res) => {
     if (event.error) {
       return res.status(400).json({ error: event.error });
     }
+    const social = await resolveSocialPostId(req.body.socialPostId);
+    if (social.error) {
+      return res.status(400).json({ error: social.error });
+    }
     await db.query(
       `INSERT INTO directorio_todos
-         (id, title, assignee, done, status, blocked_reason, note, meeting_id, event_id, position, completed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+         (id, title, assignee, done, status, blocked_reason, note, meeting_id, event_id, social_post_id, position, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         id,
         title.trim(),
@@ -375,6 +392,7 @@ router.post('/todos', async (req, res) => {
         note,
         meetingId || null,
         event.eventId,
+        social.socialPostId,
         position,
         normalized.done ? new Date() : null,
       ],
@@ -465,11 +483,19 @@ router.put('/todos/:id', async (req, res) => {
       }
       eventId = event.eventId;
     }
+    let socialPostId = current.social_post_id;
+    if (req.body.socialPostId !== undefined) {
+      const social = await resolveSocialPostId(req.body.socialPostId);
+      if (social.error) {
+        return res.status(400).json({ error: social.error });
+      }
+      socialPostId = social.socialPostId;
+    }
     await db.query(
       `UPDATE directorio_todos
        SET title = $1, assignee = $2, done = $3, status = $4, blocked_reason = $5,
-           note = $6, meeting_id = $7, event_id = $8, completed_at = $9
-       WHERE id = $10`,
+           note = $6, meeting_id = $7, event_id = $8, social_post_id = $9, completed_at = $10
+       WHERE id = $11`,
       [
         title,
         assignee,
@@ -479,6 +505,7 @@ router.put('/todos/:id', async (req, res) => {
         note,
         meetingId,
         eventId,
+        socialPostId,
         completedAt,
         req.params.id,
       ],
