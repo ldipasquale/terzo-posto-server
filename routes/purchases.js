@@ -44,6 +44,7 @@ function mapPurchase(row) {
     })),
     subtotal: Number(row.subtotal),
     discount: Number(row.discount),
+    shipping: Number(row.shipping) || 0,
     total: Number(row.total),
     paymentMethod: row.payment_method,
     mercadoPagoAccountId: row.mercado_pago_account_id || undefined,
@@ -52,6 +53,32 @@ function mapPurchase(row) {
     notes: row.notes || undefined,
     createdAt: new Date(row.created_at).toISOString(),
   };
+}
+
+function splitPurchaseNet(net, foodSub, drinkSub) {
+  const base = foodSub + drinkSub;
+  if (!(base > 0) || !(drinkSub > 0)) return { food: net, drink: 0 };
+  if (!(foodSub > 0)) return { food: 0, drink: net };
+  const drink = Math.round(((net * drinkSub) / base) * 100) / 100;
+  return { food: Math.round((net - drink) * 100) / 100, drink };
+}
+
+async function insertBuffetExpense(client, expense) {
+  await client.query(
+    `INSERT INTO finance_transactions
+    (id, account_id, type, amount, description, source, area, category, reference_id, date)
+    VALUES ($1, $2, 'expense', $3, $4, 'buffet', $5, $6, $7, $8)`,
+    [
+      crypto.randomUUID(),
+      expense.accountId,
+      expense.amount,
+      expense.description,
+      expense.areaCat.area,
+      expense.areaCat.category,
+      expense.purchaseId,
+      expense.date,
+    ],
+  );
 }
 
 const purchaseSelect = `
@@ -138,7 +165,7 @@ router.post('/', async (req, res) => {
     if (!p?.paymentMethod || !['efectivo', 'mercadopago'].includes(p.paymentMethod)) {
       return res.status(400).json({ error: 'Medio de pago inválido' });
     }
-    if (!p?.category || !['comida', 'bebida'].includes(p.category)) {
+    if (!p?.category || !['comida', 'bebida', 'ambas'].includes(p.category)) {
       return res.status(400).json({ error: 'Categoría inválida' });
     }
 
@@ -146,20 +173,24 @@ router.post('/', async (req, res) => {
     const date = p.date || new Date().toISOString();
     const subtotal = Number(p.subtotal) || 0;
     const discount = Number(p.discount) || 0;
-    const total = Number(p.total) || Math.max(0, subtotal - discount);
+    const shipping = Math.max(0, Number(p.shipping) || 0);
+    const total = Number.isFinite(Number(p.total))
+      ? Number(p.total)
+      : Math.max(0, subtotal - discount + shipping);
     const provider = String(p.provider || '').trim();
     const notes = p.notes ? String(p.notes).trim() : null;
 
     await client.query('BEGIN');
     await client.query(
       `INSERT INTO buffet_purchases
-      (id, date, subtotal, discount, total, payment_method, mercado_pago_account_id, category, provider, notes)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      (id, date, subtotal, discount, shipping, total, payment_method, mercado_pago_account_id, category, provider, notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         id,
         date,
         subtotal,
         discount,
+        shipping,
         total,
         p.paymentMethod,
         p.paymentMethod === 'mercadopago' ? p.mercadoPagoAccountId ?? null : null,
@@ -219,30 +250,65 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Cuenta de pago inválida' });
     }
 
-    const desc =
-      provider
-        ? `Compra: ${provider}${notes ? ` — ${notes}` : ''}`
-        : `Compra de insumos${notes ? ` — ${notes}` : ''}`;
-    const financeAreaCat =
-      p.category === 'comida'
-        ? FINANCE_AREA_CATEGORY.purchaseFood
-        : FINANCE_AREA_CATEGORY.purchaseDrink;
-    const txId = crypto.randomUUID();
-    await client.query(
-      `INSERT INTO finance_transactions
-      (id, account_id, type, amount, description, source, area, category, reference_id, date)
-      VALUES ($1, $2, 'expense', $3, $4, 'buffet', $5, $6, $7, $8)`,
-      [
-        txId,
-        financeAccountId,
-        total,
-        desc,
-        financeAreaCat.area,
-        financeAreaCat.category,
-        id,
+    const labeled = (label) => {
+      if (provider) {
+        return notes ? `${label}: ${provider} — ${notes}` : `${label}: ${provider}`;
+      }
+      return notes ? `${label} — ${notes}` : label;
+    };
+    const singleDesc = provider
+      ? `Compra: ${provider}${notes ? ` — ${notes}` : ''}`
+      : `Compra de insumos${notes ? ` — ${notes}` : ''}`;
+    const expenses = [];
+    if (p.category === 'ambas') {
+      const originRows = await client.query(
+        'SELECT id, origin FROM supplies WHERE id = ANY($1::text[])',
+        [p.items.map((item) => String(item.supplyId))],
+      );
+      const originById = new Map(
+        originRows.rows.map((row) => [row.id, row.origin]),
+      );
+      let foodSub = 0;
+      let drinkSub = 0;
+      for (const item of p.items) {
+        const line = Number(item.quantity) * Number(item.unitPrice);
+        if (originById.get(String(item.supplyId)) === 'bebidas') drinkSub += line;
+        else foodSub += line;
+      }
+      const split = splitPurchaseNet(total, foodSub, drinkSub);
+      if (split.food > 0) {
+        expenses.push({
+          amount: split.food,
+          areaCat: FINANCE_AREA_CATEGORY.purchaseFood,
+          description: labeled('Compra comida'),
+        });
+      }
+      if (split.drink > 0) {
+        expenses.push({
+          amount: split.drink,
+          areaCat: FINANCE_AREA_CATEGORY.purchaseDrink,
+          description: labeled('Compra bebidas'),
+        });
+      }
+    }
+    if (expenses.length === 0) {
+      expenses.push({
+        amount: total,
+        areaCat:
+          p.category === 'bebida'
+            ? FINANCE_AREA_CATEGORY.purchaseDrink
+            : FINANCE_AREA_CATEGORY.purchaseFood,
+        description: singleDesc,
+      });
+    }
+    for (const expense of expenses) {
+      await insertBuffetExpense(client, {
+        ...expense,
+        accountId: financeAccountId,
+        purchaseId: id,
         date,
-      ],
-    );
+      });
+    }
 
     await client.query('COMMIT');
     const created = await db.query(`${purchaseSelect} WHERE p.id = $1`, [id]);

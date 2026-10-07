@@ -177,10 +177,11 @@ const CREATE_TABLES = `
     date TIMESTAMP NOT NULL,
     subtotal DOUBLE PRECISION NOT NULL DEFAULT 0,
     discount DOUBLE PRECISION NOT NULL DEFAULT 0,
+    shipping DOUBLE PRECISION NOT NULL DEFAULT 0,
     total DOUBLE PRECISION NOT NULL DEFAULT 0,
     payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
     mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
-    category TEXT NOT NULL CHECK (category IN ('comida', 'bebida')),
+    category TEXT NOT NULL CHECK (category IN ('comida', 'bebida', 'ambas')),
     provider TEXT,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -675,6 +676,29 @@ async function initDb() {
         'UPDATE buffet_purchase_items SET unit_price_per_unit = unit_price WHERE unit_price_per_unit IS NULL',
       );
     }
+
+    await client.query(
+      'ALTER TABLE buffet_purchases ADD COLUMN IF NOT EXISTS shipping DOUBLE PRECISION NOT NULL DEFAULT 0',
+    );
+    const purchaseCategoryChecks = await client.query(`
+      SELECT con.conname
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+      WHERE rel.relname = 'buffet_purchases'
+        AND con.contype = 'c'
+        AND pg_get_constraintdef(con.oid) ILIKE '%category%'
+    `);
+    for (const row of purchaseCategoryChecks.rows) {
+      const name = String(row.conname).replace(/"/g, '""');
+      await client.query(
+        `ALTER TABLE buffet_purchases DROP CONSTRAINT IF EXISTS "${name}"`,
+      );
+    }
+    await client.query(`
+      ALTER TABLE buffet_purchases
+      ADD CONSTRAINT buffet_purchases_category_check
+      CHECK (category IN ('comida', 'bebida', 'ambas'))
+    `);
 
     const mpCols = await client.query(
       "SELECT column_name FROM information_schema.columns WHERE table_name = 'mercado_pago_accounts'",
