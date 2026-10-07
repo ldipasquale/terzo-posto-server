@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import pg from 'pg';
 import bcrypt from 'bcryptjs';
 import { ensureRentalSlug } from './lib/eventTickets.js';
@@ -340,6 +341,7 @@ const CREATE_TABLES = `
     anchor_month INTEGER,
     notes TEXT,
     responsible_name TEXT,
+    has_certificate SMALLINT NOT NULL DEFAULT 0,
     active SMALLINT NOT NULL DEFAULT 1,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -356,6 +358,16 @@ const CREATE_TABLES = `
     certificate_file TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS finance_fixed_expense_certificates (
+    id TEXT PRIMARY KEY,
+    fixed_expense_id TEXT NOT NULL REFERENCES finance_fixed_expenses(id) ON DELETE CASCADE,
+    file TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_fixed_expense_certificates_expense
+    ON finance_fixed_expense_certificates (fixed_expense_id, created_at DESC);
 
   CREATE TABLE IF NOT EXISTS finance_invoice_marks (
     source_key TEXT PRIMARY KEY,
@@ -1478,6 +1490,57 @@ async function initDb() {
     await client.query(`
       ALTER TABLE finance_fixed_expense_payments ADD COLUMN IF NOT EXISTS certificate_file TEXT;
     `);
+
+    const legacyCertificates = await client.query(`
+      SELECT id, fixed_expense_id, certificate_file, paid_date, created_at
+      FROM finance_fixed_expense_payments
+      WHERE certificate_file IS NOT NULL AND btrim(certificate_file) <> ''
+    `);
+    for (const row of legacyCertificates.rows) {
+      const existing = await client.query(
+        'SELECT id FROM finance_fixed_expense_certificates WHERE file = $1',
+        [row.certificate_file],
+      );
+      if (existing.rowCount === 0) {
+        await client.query(
+          `INSERT INTO finance_fixed_expense_certificates
+            (id, fixed_expense_id, file, created_at)
+           VALUES ($1, $2, $3, $4)`,
+          [
+            crypto.randomUUID(),
+            row.fixed_expense_id,
+            row.certificate_file,
+            row.paid_date || row.created_at || new Date(),
+          ],
+        );
+      }
+      await client.query(
+        'UPDATE finance_fixed_expense_payments SET certificate_file = NULL WHERE id = $1',
+        [row.id],
+      );
+    }
+
+    const hasCertificateColumn = await client.query(`
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_name = 'finance_fixed_expenses'
+        AND column_name = 'has_certificate'
+    `);
+    await client.query(`
+      ALTER TABLE finance_fixed_expenses
+      ADD COLUMN IF NOT EXISTS has_certificate SMALLINT NOT NULL DEFAULT 0
+    `);
+    if (hasCertificateColumn.rowCount === 0) {
+      await client.query(`
+        UPDATE finance_fixed_expenses AS expense
+        SET has_certificate = 1
+        WHERE EXISTS (
+          SELECT 1
+          FROM finance_fixed_expense_certificates AS certificate
+          WHERE certificate.fixed_expense_id = expense.id
+        )
+      `);
+    }
 
     await client.query(`
       ALTER TABLE finance_invoice_marks ADD COLUMN IF NOT EXISTS archived SMALLINT NOT NULL DEFAULT 0;

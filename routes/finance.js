@@ -34,6 +34,17 @@ const router = express.Router();
 
 const PARTNERS = ['Lucho', 'Bachi', 'Luli'];
 const RECEIPT_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+const CERTIFICATE_MIMES = [...RECEIPT_MIMES, 'application/pdf'];
+const CERTIFICATE_NAME_RE = /^[a-f0-9-]{36}\.(jpe?g|png|webp|pdf)$/i;
+
+function isCertificateFileName(name) {
+  return CERTIFICATE_NAME_RE.test(String(name || ''));
+}
+
+function certificateExtension(mimetype) {
+  if (mimetype === 'application/pdf') return 'pdf';
+  return receiptExtension(mimetype);
+}
 
 const receiptUpload = multer({
   storage: multer.memoryStorage(),
@@ -49,11 +60,22 @@ const receiptUpload = multer({
 
 const paymentFilesUpload = receiptUpload.fields([
   { name: 'receipt', maxCount: 1 },
-  { name: 'certificate', maxCount: 1 },
 ]);
 
+const certificateUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (!CERTIFICATE_MIMES.includes(file.mimetype)) {
+      cb(new Error('Solo se permiten imágenes JPEG, PNG, WebP o PDF'));
+      return;
+    }
+    cb(null, true);
+  },
+});
+
 function removeReceiptFile(fileName) {
-  if (!fileName || !isReceiptFileName(fileName)) return;
+  if (!fileName || !isCertificateFileName(fileName)) return;
   const filePath = path.join(fixedExpenseReceiptsDir(), fileName);
   try {
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
@@ -133,9 +155,35 @@ const mapFixedExpense = (row) => ({
   anchorMonth: row.anchor_month == null ? undefined : Number(row.anchor_month),
   notes: row.notes || undefined,
   responsibleName: row.responsible_name || undefined,
+  hasCertificate: Boolean(row.has_certificate),
   active: Boolean(row.active),
   createdAt: new Date(row.created_at).toISOString(),
+  latestCertificateId: row.latest_certificate_id || null,
+  latestCertificateAt: row.latest_certificate_at
+    ? new Date(row.latest_certificate_at).toISOString()
+    : null,
 });
+
+const mapFixedExpenseCertificate = (row) => ({
+  id: row.id,
+  fixedExpenseId: row.fixed_expense_id,
+  createdAt: new Date(row.created_at).toISOString(),
+  url: `/api/finance/fixed-expense-certificates/${row.id}/file`,
+});
+
+const FIXED_EXPENSE_SELECT = `
+  SELECT expense.*,
+    latest.id AS latest_certificate_id,
+    latest.created_at AS latest_certificate_at
+  FROM finance_fixed_expenses expense
+  LEFT JOIN LATERAL (
+    SELECT id, created_at
+    FROM finance_fixed_expense_certificates
+    WHERE fixed_expense_id = expense.id
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  ) latest ON true
+`;
 
 async function syncFixedExpenseAmount(client, expenseId) {
   await client.query(
@@ -560,7 +608,7 @@ router.delete('/transactions/:id', async (req, res) => {
 
 router.get('/fixed-expenses', async (_req, res) => {
   try {
-    const result = await db.query('SELECT * FROM finance_fixed_expenses ORDER BY created_at DESC');
+    const result = await db.query(`${FIXED_EXPENSE_SELECT} ORDER BY expense.created_at DESC`);
     res.json(result.rows.map(mapFixedExpense));
   } catch (error) {
     console.error('Error fetching fixed expenses:', error);
@@ -586,8 +634,8 @@ router.post('/fixed-expenses', async (req, res) => {
     const id = crypto.randomUUID();
     await db.query(
       `INSERT INTO finance_fixed_expenses
-        (id, name, amount, due_day, frequency, anchor_month, notes, responsible_name, active)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        (id, name, amount, due_day, frequency, anchor_month, notes, responsible_name, active, has_certificate)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         id,
         String(e.name).trim(),
@@ -598,9 +646,10 @@ router.post('/fixed-expenses', async (req, res) => {
         e.notes ?? null,
         responsibleName,
         e.active === false ? 0 : 1,
+        e.hasCertificate ? 1 : 0,
       ],
     );
-    const created = await db.query('SELECT * FROM finance_fixed_expenses WHERE id = $1', [id]);
+    const created = await db.query(`${FIXED_EXPENSE_SELECT} WHERE expense.id = $1`, [id]);
     res.status(201).json(mapFixedExpense(created.rows[0]));
   } catch (error) {
     console.error('Error creating fixed expense:', error);
@@ -640,6 +689,7 @@ router.put('/fixed-expenses/:id', async (req, res) => {
            WHEN $8::text IS NOT NULL THEN $9
            ELSE anchor_month
          END,
+         has_certificate = COALESCE($10, has_certificate),
          updated_at = CURRENT_TIMESTAMP
        WHERE id = $7`,
       [
@@ -652,10 +702,11 @@ router.put('/fixed-expenses/:id', async (req, res) => {
         req.params.id,
         schedule?.frequency ?? null,
         schedule?.anchorMonth ?? null,
+        e.hasCertificate == null ? null : e.hasCertificate ? 1 : 0,
       ],
     );
     if (result.rowCount === 0) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
-    const updated = await db.query('SELECT * FROM finance_fixed_expenses WHERE id = $1', [req.params.id]);
+    const updated = await db.query(`${FIXED_EXPENSE_SELECT} WHERE expense.id = $1`, [req.params.id]);
     res.json(mapFixedExpense(updated.rows[0]));
   } catch (error) {
     console.error('Error updating fixed expense:', error);
@@ -669,17 +720,120 @@ router.delete('/fixed-expenses/:id', async (req, res) => {
       'SELECT receipt_file, certificate_file FROM finance_fixed_expense_payments WHERE fixed_expense_id = $1',
       [req.params.id],
     );
+    const certificates = await db.query(
+      'SELECT file FROM finance_fixed_expense_certificates WHERE fixed_expense_id = $1',
+      [req.params.id],
+    );
     const result = await db.query('DELETE FROM finance_fixed_expenses WHERE id = $1', [req.params.id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Gasto fijo no encontrado' });
     for (const row of payments.rows) {
       removeReceiptFile(row.receipt_file);
       removeReceiptFile(row.certificate_file);
     }
+    for (const row of certificates.rows) {
+      removeReceiptFile(row.file);
+    }
     res.status(204).send();
   } catch (error) {
     console.error('Error deleting fixed expense:', error);
     res.status(500).json({ error: 'Error al eliminar gasto fijo' });
   }
+});
+
+router.get('/fixed-expenses/:id/certificates', async (req, res) => {
+  try {
+    const expense = await db.query(
+      'SELECT id FROM finance_fixed_expenses WHERE id = $1',
+      [req.params.id],
+    );
+    if (expense.rowCount === 0) {
+      return res.status(404).json({ error: 'Gasto fijo no encontrado' });
+    }
+    const result = await db.query(
+      `SELECT * FROM finance_fixed_expense_certificates
+       WHERE fixed_expense_id = $1
+       ORDER BY created_at DESC, id DESC`,
+      [req.params.id],
+    );
+    res.json(result.rows.map(mapFixedExpenseCertificate));
+  } catch (error) {
+    console.error('Error fetching fixed expense certificates:', error);
+    res.status(500).json({ error: 'Error al obtener los certificados' });
+  }
+});
+
+router.get('/fixed-expense-certificates/:id/file', async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT file FROM finance_fixed_expense_certificates WHERE id = $1',
+      [req.params.id],
+    );
+    const fileName = result.rows[0]?.file;
+    if (!fileName || !isCertificateFileName(fileName)) {
+      return res.status(404).json({ error: 'No se encontró el certificado' });
+    }
+    const filePath = path.join(fixedExpenseReceiptsDir(), fileName);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'No se encontró el certificado' });
+    }
+    res.sendFile(filePath);
+  } catch (error) {
+    console.error('Error fetching fixed expense certificate:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Error al obtener el certificado' });
+    }
+  }
+});
+
+router.post('/fixed-expenses/:id/certificates', (req, res) => {
+  certificateUpload.single('certificate')(req, res, async (err) => {
+    if (err) {
+      const message = err.code === 'LIMIT_FILE_SIZE'
+        ? 'El archivo no puede superar 8 MB'
+        : err.message || 'Archivo inválido';
+      return res.status(400).json({ error: message });
+    }
+    const certificate = req.file;
+    if (!certificate?.size) {
+      return res.status(400).json({ error: 'Subí el certificado' });
+    }
+
+    let certificateFile = null;
+    try {
+      const expense = await db.query(
+        'SELECT id, has_certificate FROM finance_fixed_expenses WHERE id = $1',
+        [req.params.id],
+      );
+      if (expense.rowCount === 0) {
+        return res.status(404).json({ error: 'Gasto fijo no encontrado' });
+      }
+      if (!expense.rows[0].has_certificate) {
+        return res.status(400).json({ error: 'Este gasto no tiene certificado' });
+      }
+
+      const dir = ensureFixedExpenseReceiptsDir();
+      certificateFile = `${newId()}.${certificateExtension(certificate.mimetype)}`;
+      fs.writeFileSync(path.join(dir, certificateFile), certificate.buffer);
+
+      const id = crypto.randomUUID();
+      await db.query(
+        `INSERT INTO finance_fixed_expense_certificates (id, fixed_expense_id, file)
+         VALUES ($1, $2, $3)`,
+        [id, req.params.id, certificateFile],
+      );
+      const created = await db.query(
+        'SELECT * FROM finance_fixed_expense_certificates WHERE id = $1',
+        [id],
+      );
+      res.status(201).json(mapFixedExpenseCertificate(created.rows[0]));
+    } catch (error) {
+      removeReceiptFile(certificateFile);
+      console.error('Error uploading fixed expense certificate:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Error al guardar el certificado' });
+      }
+    }
+  });
 });
 
 router.get('/fixed-expense-payments', async (_req, res) => {
@@ -742,13 +896,11 @@ router.post('/fixed-expense-payments', (req, res) => {
       return res.status(400).json({ error: message });
     }
     const receipt = req.files?.receipt?.[0];
-    const certificate = req.files?.certificate?.[0];
     if (!receipt?.size) {
       return res.status(400).json({ error: 'Subí el comprobante de pago' });
     }
 
     let receiptFile = null;
-    let certificateFile = null;
     try {
       const p = req.body;
       if (!p?.fixedExpenseId || !p?.month || Number(p.amount) <= 0 || !p?.accountId) {
@@ -772,10 +924,6 @@ router.post('/fixed-expense-payments', (req, res) => {
       const dir = ensureFixedExpenseReceiptsDir();
       receiptFile = `${newId()}.${receiptExtension(receipt.mimetype)}`;
       fs.writeFileSync(path.join(dir, receiptFile), receipt.buffer);
-      if (certificate?.size) {
-        certificateFile = `${newId()}.${receiptExtension(certificate.mimetype)}`;
-        fs.writeFileSync(path.join(dir, certificateFile), certificate.buffer);
-      }
 
       const client = await db.connect();
       const id = crypto.randomUUID();
@@ -785,8 +933,8 @@ router.post('/fixed-expense-payments', (req, res) => {
         await client.query('BEGIN');
         await client.query(
           `INSERT INTO finance_fixed_expense_payments
-          (id, fixed_expense_id, month, amount, account_id, paid_date, receipt_file, certificate_file)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+          (id, fixed_expense_id, month, amount, account_id, paid_date, receipt_file)
+          VALUES ($1,$2,$3,$4,$5,$6,$7)`,
           [
             id,
             p.fixedExpenseId,
@@ -795,7 +943,6 @@ router.post('/fixed-expense-payments', (req, res) => {
             accountId,
             paidDate,
             receiptFile,
-            certificateFile,
           ],
         );
         await client.query(
@@ -828,7 +975,6 @@ router.post('/fixed-expense-payments', (req, res) => {
       }
     } catch (error) {
       removeReceiptFile(receiptFile);
-      removeReceiptFile(certificateFile);
       console.error('Error creating fixed expense payment:', error);
       if (!res.headersSent) {
         res.status(500).json({ error: 'Error al registrar pago' });
