@@ -1050,6 +1050,8 @@ router.get('/events-profitability', async (req, res) => {
         r.event_type,
         r.date,
         COALESCE(pay.rental_income, 0) AS rental_income,
+        COALESCE(pay.food_income, 0) AS food_income,
+        COALESCE(pay.drink_income, 0) AS drink_income,
         COALESCE(pay.ticket_income, 0) AS ticket_income,
         cr.id AS cash_register_id,
         COALESCE(buff.buffet_income, 0) AS buffet_income,
@@ -1058,7 +1060,15 @@ router.get('/events-profitability', async (req, res) => {
       FROM agenda_rentals r
       LEFT JOIN (
         SELECT ap.rental_id,
-          SUM(CASE WHEN ap.payment_type = 'rental' THEN ap.amount ELSE 0 END) AS rental_income,
+          SUM(
+            CASE
+              WHEN ap.payment_type = 'rental' THEN
+                GREATEST(ap.amount - COALESCE(split.food, 0) - COALESCE(split.drink, 0), 0)
+              ELSE 0
+            END
+          ) AS rental_income,
+          SUM(CASE WHEN ap.payment_type = 'rental' THEN COALESCE(split.food, 0) ELSE 0 END) AS food_income,
+          SUM(CASE WHEN ap.payment_type = 'rental' THEN COALESCE(split.drink, 0) ELSE 0 END) AS drink_income,
           SUM(CASE WHEN ap.payment_type = 'tickets' THEN ap.amount ELSE 0 END)
             + SUM(
                 CASE
@@ -1067,6 +1077,18 @@ router.get('/events-profitability', async (req, res) => {
                 END
               ) AS ticket_income
         FROM agenda_payments ap
+        LEFT JOIN (
+          SELECT reference_id,
+            SUM(amount) FILTER (
+              WHERE category IN ('catering-eventos-privados', 'ventas-comida-salon')
+            ) AS food,
+            SUM(amount) FILTER (
+              WHERE category IN ('ventas-bebidas-salon', 'vasos')
+            ) AS drink
+          FROM finance_transactions
+          WHERE type = 'income'
+          GROUP BY reference_id
+        ) split ON split.reference_id = ap.id
         LEFT JOIN (
           SELECT reference_id, SUM(amount) AS amount
           FROM finance_transactions
@@ -1126,13 +1148,17 @@ router.get('/events-profitability', async (req, res) => {
       result.rows.map((row) => {
         const buffetCost = Number(row.buffet_cost);
         const linkedExpenses = Number(row.linked_expenses);
+        const foodIncome = Number(row.food_income);
+        const drinkIncome = Number(row.drink_income);
         return {
           id: row.id,
           name: row.activity_name,
           eventType: row.event_type,
           date: toYmd(row.date),
           rentalIncome: Number(row.rental_income),
-          buffetIncome: Number(row.buffet_income),
+          buffetIncome: Number(row.buffet_income) + foodIncome + drinkIncome,
+          foodIncome,
+          drinkIncome,
           ticketIncome: Number(row.ticket_income),
           buffetCost,
           linkedExpenses,
