@@ -1057,11 +1057,23 @@ router.get('/events-profitability', async (req, res) => {
         COALESCE(exp.linked_expenses, 0) AS linked_expenses
       FROM agenda_rentals r
       LEFT JOIN (
-        SELECT rental_id,
-          SUM(CASE WHEN payment_type = 'rental' THEN amount ELSE 0 END) AS rental_income,
-          SUM(CASE WHEN payment_type = 'tickets' THEN amount ELSE 0 END) AS ticket_income
-        FROM agenda_payments
-        GROUP BY rental_id
+        SELECT ap.rental_id,
+          SUM(CASE WHEN ap.payment_type = 'rental' THEN ap.amount ELSE 0 END) AS rental_income,
+          SUM(CASE WHEN ap.payment_type = 'tickets' THEN ap.amount ELSE 0 END)
+            + SUM(
+                CASE
+                  WHEN ap.payment_type = 'ticket_sales' THEN COALESCE(ent.amount, 0)
+                  ELSE 0
+                END
+              ) AS ticket_income
+        FROM agenda_payments ap
+        LEFT JOIN (
+          SELECT reference_id, SUM(amount) AS amount
+          FROM finance_transactions
+          WHERE type = 'income' AND category = 'entradas'
+          GROUP BY reference_id
+        ) ent ON ent.reference_id = ap.id
+        GROUP BY ap.rental_id
       ) pay ON pay.rental_id = r.id
       LEFT JOIN cash_registers cr ON cr.event_id = r.id
       LEFT JOIN (

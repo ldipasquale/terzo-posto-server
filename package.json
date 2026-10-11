@@ -17,6 +17,7 @@
     "list:menu-without-cost": "node scripts/list-menu-items-without-cost.mjs",
     "set:hardcoded-order-item-costs": "node scripts/set-hardcoded-order-item-unit-costs.mjs",
     "recalc:september-2026-buffet": "node scripts/recalc-september-2026-buffet.mjs",
+    "fix:bachi-last-cash-close": "node scripts/fix-bachi-last-cash-close.mjs",
     "backfill:ticket-sales-food-split": "node scripts/backfill-ticket-sales-food-split.mjs",
     "invoice:test": "node scripts/issue-test-invoice.mjs"
   },
