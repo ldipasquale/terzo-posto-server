@@ -1056,7 +1056,8 @@ router.get('/events-profitability', async (req, res) => {
         cr.id AS cash_register_id,
         COALESCE(buff.buffet_income, 0) AS buffet_income,
         COALESCE(buff.buffet_cost, 0) AS buffet_cost,
-        COALESCE(exp.linked_expenses, 0) AS linked_expenses
+        COALESCE(exp.linked_expenses, 0) AS linked_expenses,
+        COALESCE(r.prepaid_goods_cost, 0) AS prepaid_goods_cost
       FROM agenda_rentals r
       LEFT JOIN (
         SELECT ap.rental_id,
@@ -1148,6 +1149,7 @@ router.get('/events-profitability', async (req, res) => {
       result.rows.map((row) => {
         const buffetCost = Number(row.buffet_cost);
         const linkedExpenses = Number(row.linked_expenses);
+        const prepaidGoodsCost = Number(row.prepaid_goods_cost) || 0;
         const foodIncome = Number(row.food_income);
         const drinkIncome = Number(row.drink_income);
         return {
@@ -1162,7 +1164,8 @@ router.get('/events-profitability', async (req, res) => {
           ticketIncome: Number(row.ticket_income),
           buffetCost,
           linkedExpenses,
-          totalCost: buffetCost + linkedExpenses,
+          prepaidGoodsCost,
+          totalCost: buffetCost + linkedExpenses + prepaidGoodsCost,
           cashRegisterId: row.cash_register_id || undefined,
         };
       }),

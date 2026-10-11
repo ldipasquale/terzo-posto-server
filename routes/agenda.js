@@ -108,6 +108,13 @@ function emptyToNullCount(value) {
   return Math.round(n);
 }
 
+function emptyToNullMoney(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(n);
+}
+
 const mapRoom = (row) => ({
   id: row.id,
   name: row.name,
@@ -161,6 +168,9 @@ const mapRental = (row) => ({
     ? new Date(row.ticket_sales_closed_at).toISOString()
     : undefined,
   staffCount: row.staff_count != null ? Number(row.staff_count) : undefined,
+  /** Costo estimado de comida o bebida prepagada. Solo afecta la ganancia del evento. */
+  prepaidGoodsCost:
+    row.prepaid_goods_cost != null ? Number(row.prepaid_goods_cost) : undefined,
   staffFood: row.staff_food || undefined,
   staffDrinks: row.staff_drinks || undefined,
   eventTimeline: row.event_timeline || undefined,
@@ -518,6 +528,11 @@ router.put('/rentals/:id', async (req, res) => {
         : String(r.notes).trim()
       : null;
     const staffCountField = optionalBodyField(r, 'staffCount', emptyToNullCount);
+    const prepaidGoodsCostField = optionalBodyField(
+      r,
+      'prepaidGoodsCost',
+      emptyToNullMoney,
+    );
     const staffFoodField = optionalBodyField(r, 'staffFood', emptyToNullText);
     const staffDrinksField = optionalBodyField(r, 'staffDrinks', emptyToNullText);
     const eventTimelineField = optionalBodyField(
@@ -587,6 +602,7 @@ router.put('/rentals/:id', async (req, res) => {
         event_description = CASE WHEN $40::boolean THEN $39 ELSE event_description END,
         has_entradas = COALESCE($41, has_entradas),
         responsible_name = CASE WHEN $43::boolean THEN $42 ELSE responsible_name END,
+        prepaid_goods_cost = CASE WHEN $45::boolean THEN $44 ELSE prepaid_goods_cost END,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = $23`,
       [
@@ -633,6 +649,8 @@ router.put('/rentals/:id', async (req, res) => {
         r.hasEntradas == null ? null : r.hasEntradas ? 1 : 0,
         responsibleNameField.value,
         responsibleNameField.present,
+        prepaidGoodsCostField.value,
+        prepaidGoodsCostField.present,
       ],
     );
     if (result.rowCount === 0)

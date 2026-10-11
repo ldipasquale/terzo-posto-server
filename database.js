@@ -1189,6 +1189,9 @@ async function initDb() {
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS staff_count INTEGER;
     `);
     await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS prepaid_goods_cost DOUBLE PRECISION;
+    `);
+    await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS staff_food TEXT;
     `);
     await client.query(`
