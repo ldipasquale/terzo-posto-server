@@ -19,7 +19,9 @@ import {
   phoneDigits,
   receiptExtension,
   receiptsDir,
+  todayYmdBuenosAires,
   userPhotosDir,
+  ymd,
 } from '../lib/eventTickets.js';
 import {
   isValidEmail,
@@ -99,6 +101,71 @@ const receiptUpload = multer({
     }
     cb(null, true);
   },
+});
+
+function mapPublicListing(row) {
+  return {
+    slug: row.slug,
+    event_name: row.activity_name,
+    event_date: ymd(row.date),
+    event_start_time: row.start_time || null,
+    event_type: row.event_type || null,
+    description: row.event_description
+      ? String(row.event_description).trim() || null
+      : null,
+    flyer_url: row.flyer_file ? `/api/public/flyers/${row.flyer_file}` : null,
+    from_price: row.from_price == null ? null : Number(row.from_price),
+    sold_out: row.sold_out === true,
+  };
+}
+
+router.get('/events', async (req, res) => {
+  try {
+    const today = todayYmdBuenosAires();
+    const [venue, result] = await Promise.all([
+      getVenueLocation(db),
+      db.query(
+        `SELECT
+           r.id,
+           r.slug,
+           r.activity_name,
+           r.date,
+           r.start_time,
+           r.event_type,
+           r.event_description,
+           r.flyer_file,
+           MIN(tt.price) FILTER (
+             WHERE tt.available_quantity > COALESCE(sold.sold, 0)
+           ) AS from_price,
+           COALESCE(
+             BOOL_AND(tt.available_quantity <= COALESCE(sold.sold, 0)),
+             FALSE
+           ) AS sold_out
+         FROM agenda_rentals r
+         JOIN event_ticket_types tt ON tt.rental_id = r.id
+         LEFT JOIN (
+           SELECT ticket_type_id, COALESCE(SUM(quantity), 0)::int AS sold
+           FROM event_tickets
+           WHERE status <> 'rejected'
+           GROUP BY ticket_type_id
+         ) sold ON sold.ticket_type_id = tt.id
+         WHERE r.has_tickets = 1
+           AND NULLIF(BTRIM(r.slug), '') IS NOT NULL
+           AND r.ticket_sales_closed_at IS NULL
+           AND (r.date IS NULL OR r.date >= $1::date)
+         GROUP BY r.id
+         ORDER BY r.date ASC NULLS LAST, r.start_time ASC NULLS LAST, r.activity_name ASC`,
+        [today],
+      ),
+    ]);
+    res.json({
+      venue,
+      events: result.rows.map(mapPublicListing),
+    });
+  } catch (error) {
+    console.error('public events:', error);
+    res.status(500).json({ error: 'Error al obtener la agenda' });
+  }
 });
 
 router.get('/events/:slug', async (req, res) => {
