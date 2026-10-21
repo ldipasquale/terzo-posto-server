@@ -17,6 +17,12 @@ import {
   getVenueLocation,
   normalizeVenueLocation,
 } from '../lib/venueLocation.js';
+import {
+  STAFF_HOUR_KEY,
+  STAFF_JORNADA_KEY,
+  getStaffPayDefaults,
+  parseMoney,
+} from '../lib/staffPay.js';
 const router = express.Router();
 
 function emptyToNullText(value) {
@@ -212,6 +218,40 @@ router.put('/buffet', async (req, res) => {
   } catch (error) {
     console.error('Error updating buffet settings:', error);
     res.status(500).json({ error: 'Error al guardar la configuración del buffet' });
+  }
+});
+
+router.get('/staff-pay', async (_req, res) => {
+  try {
+    res.json(await getStaffPayDefaults(db));
+  } catch (error) {
+    console.error('Error fetching staff pay settings:', error);
+    res.status(500).json({ error: 'Error al obtener los valores de jornada' });
+  }
+});
+
+router.put('/staff-pay', requireAdminMiddleware, async (req, res) => {
+  try {
+    const jornada = parseMoney(req.body?.jornadaAmount, 'El valor de la jornada');
+    if (jornada.error) return res.status(400).json({ error: jornada.error });
+    const hour = parseMoney(req.body?.hourAmount, 'El valor de la hora');
+    if (hour.error) return res.status(400).json({ error: hour.error });
+    await db.query(
+      `INSERT INTO settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
+      [STAFF_JORNADA_KEY, String(jornada.amount)],
+    );
+    await db.query(
+      `INSERT INTO settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
+      [STAFF_HOUR_KEY, String(hour.amount)],
+    );
+    res.json({ jornadaAmount: jornada.amount, hourAmount: hour.amount });
+  } catch (error) {
+    console.error('Error updating staff pay settings:', error);
+    res.status(500).json({ error: 'Error al guardar los valores de jornada' });
   }
 });
 

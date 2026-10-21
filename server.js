@@ -25,6 +25,7 @@ import {
   requireAnyPermission,
 } from './middleware/requirePermission.js';
 import { PERMISSIONS } from './lib/userPermissions.js';
+import employeesRoutes from './routes/employees.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -87,6 +88,12 @@ app.use(
   authenticateToken,
   requireAnyPermission(PERMISSIONS.FINANZAS),
   financeRoutes,
+);
+app.use(
+  '/api/employees',
+  authenticateToken,
+  requireAnyPermission(PERMISSIONS.COMANDAS, PERMISSIONS.FINANZAS),
+  employeesRoutes,
 );
 app.use(
   '/api/purchases',

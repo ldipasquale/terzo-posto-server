@@ -16,6 +16,7 @@ import {
   canLinkEventToArea,
   isValidAreaCategory,
 } from '../lib/financeAreas.js';
+import { allocateStaffCosts } from '../lib/eventWindowAllocation.js';
 import {
   invoiceIssuers,
   listIssuerActivities,
@@ -1053,9 +1054,12 @@ router.get('/events-profitability', async (req, res) => {
         COALESCE(pay.food_income, 0) AS food_income,
         COALESCE(pay.drink_income, 0) AS drink_income,
         COALESCE(pay.ticket_income, 0) AS ticket_income,
-        cr.id AS cash_register_id,
-        COALESCE(buff.buffet_income, 0) AS buffet_income,
-        COALESCE(buff.buffet_cost, 0) AS buffet_cost,
+        to_char(r.date, 'YYYY-MM-DD') AS date_key,
+        r.start_time,
+        r.end_time,
+        COALESCE(alloc.cash_register_id, cr.id) AS cash_register_id,
+        COALESCE(alloc.buffet_income, 0) + COALESCE(buff.buffet_income, 0) AS buffet_income,
+        COALESCE(alloc.buffet_cost, 0) + COALESCE(buff.buffet_cost, 0) AS buffet_cost,
         COALESCE(exp.linked_expenses, 0) AS linked_expenses,
         COALESCE(r.prepaid_goods_cost, 0) AS prepaid_goods_cost
       FROM agenda_rentals r
@@ -1098,7 +1102,22 @@ router.get('/events-profitability', async (req, res) => {
         ) ent ON ent.reference_id = ap.id
         GROUP BY ap.rental_id
       ) pay ON pay.rental_id = r.id
+      LEFT JOIN (
+        SELECT
+          elem->>'eventId' AS event_id,
+          SUM((elem->>'income')::double precision) AS buffet_income,
+          SUM((elem->>'cost')::double precision) AS buffet_cost,
+          (array_agg(cr.id ORDER BY cr.closed_at DESC NULLS LAST))[1] AS cash_register_id
+        FROM cash_registers cr
+        CROSS JOIN LATERAL jsonb_array_elements(cr.closing_data->'eventAllocation') elem
+        WHERE jsonb_typeof(cr.closing_data->'eventAllocation') = 'array'
+        GROUP BY elem->>'eventId'
+      ) alloc ON alloc.event_id = r.id
       LEFT JOIN cash_registers cr ON cr.event_id = r.id
+        AND NOT (
+          jsonb_typeof(cr.closing_data->'eventAllocation') = 'array'
+          AND jsonb_array_length(cr.closing_data->'eventAllocation') > 0
+        )
       LEFT JOIN (
         SELECT
           cr.id AS cash_register_id,
@@ -1145,11 +1164,32 @@ router.get('/events-profitability', async (req, res) => {
       return s.includes('T') ? s.slice(0, 10) : s.slice(0, 10);
     };
 
+    const dateKeys = [...new Set(result.rows.map((row) => row.date_key).filter(Boolean))];
+    let staffByEvent = new Map();
+    if (dateKeys.length > 0) {
+      const [shifts, siblings] = await Promise.all([
+        db.query(
+          `SELECT to_char(date, 'YYYY-MM-DD') AS date, jornada_amount, overtime_amount
+           FROM staff_shifts
+           WHERE date = ANY($1::date[])`,
+          [dateKeys],
+        ),
+        db.query(
+          `SELECT id, to_char(date, 'YYYY-MM-DD') AS date, start_time, end_time
+           FROM agenda_rentals
+           WHERE type = 'one-off' AND date = ANY($1::date[])`,
+          [dateKeys],
+        ),
+      ]);
+      staffByEvent = allocateStaffCosts(shifts.rows, siblings.rows);
+    }
+
     res.json(
       result.rows.map((row) => {
         const buffetCost = Number(row.buffet_cost);
         const linkedExpenses = Number(row.linked_expenses);
         const prepaidGoodsCost = Number(row.prepaid_goods_cost) || 0;
+        const staffCost = staffByEvent.get(row.id) || 0;
         const foodIncome = Number(row.food_income);
         const drinkIncome = Number(row.drink_income);
         return {
@@ -1165,7 +1205,8 @@ router.get('/events-profitability', async (req, res) => {
           buffetCost,
           linkedExpenses,
           prepaidGoodsCost,
-          totalCost: buffetCost + linkedExpenses + prepaidGoodsCost,
+          staffCost,
+          totalCost: buffetCost + linkedExpenses + prepaidGoodsCost + staffCost,
           cashRegisterId: row.cash_register_id || undefined,
         };
       }),

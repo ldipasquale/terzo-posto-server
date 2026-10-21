@@ -12,6 +12,13 @@ import {
   normalizeOpeningChecklistRecord,
 } from "../lib/openingChecklist.js";
 import { fulfillTicketMenuOrdersForCaja } from "../lib/ticketMenu.js";
+import {
+  allocateCashRegister,
+  argentinaDateKey,
+  incomeShares,
+  splitMoney,
+} from "../lib/eventWindowAllocation.js";
+import { listCashRegisterShifts, replaceCashRegisterShifts } from "./employees.js";
 
 const router = express.Router();
 
@@ -72,14 +79,13 @@ async function insertBuffetCloseTransactions(
   client,
   cashRegisterId,
   closingData,
-  eventName,
-  eventId = null,
+  shares,
 ) {
   const payments = Array.isArray(closingData?.payments)
     ? closingData.payments
     : [];
-  const labelPrefix = eventName ? `Cierre de caja — ${eventName}` : "Cierre de caja";
   const closedAt = new Date().toISOString();
+  const eventShares = shares.length > 0 ? shares : [{ eventId: null, eventName: "", share: 1 }];
   const { food, drink, cups } = await getBuffetCloseSplitForCashRegister(
     client,
     cashRegisterId,
@@ -92,23 +98,28 @@ async function insertBuffetCloseTransactions(
     areaCat,
     referenceId,
   }) => {
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    await client.query(
-      `INSERT INTO finance_transactions
-      (id, account_id, type, amount, description, source, area, category, reference_id, event_id, date)
-      VALUES ($1, $2, 'income', $3, $4, 'buffet', $5, $6, $7, $8, $9)`,
-      [
-        crypto.randomUUID(),
-        accountId,
-        amount,
-        description,
-        areaCat.area,
-        areaCat.category,
-        referenceId,
-        eventId,
-        closedAt,
-      ],
-    );
+    const pieces = splitMoney(amount, eventShares);
+    for (const piece of pieces) {
+      const label = piece.eventName
+        ? `Cierre de caja — ${piece.eventName}`
+        : "Cierre de caja";
+      await client.query(
+        `INSERT INTO finance_transactions
+        (id, account_id, type, amount, description, source, area, category, reference_id, event_id, date)
+        VALUES ($1, $2, 'income', $3, $4, 'buffet', $5, $6, $7, $8, $9)`,
+        [
+          crypto.randomUUID(),
+          accountId,
+          piece.amount,
+          `${label} — ${description}`,
+          areaCat.area,
+          areaCat.category,
+          `${referenceId}:${piece.eventId || "dia"}`,
+          piece.eventId,
+          closedAt,
+        ],
+      );
+    }
   };
 
   /** @type {Array<{ amount: number, accountId: string, paymentRef: string, payLabel: string }>} */
@@ -156,21 +167,21 @@ async function insertBuffetCloseTransactions(
     await insertPart({
       accountId,
       amount: foodAmount,
-      description: `${labelPrefix} — ${payLabel} (comida)`,
+      description: `${payLabel} (comida)`,
       areaCat: FINANCE_AREA_CATEGORY.buffetFoodIncome,
       referenceId: `${baseRef}:comida`,
     });
     await insertPart({
       accountId,
       amount: drinkAmount,
-      description: `${labelPrefix} — ${payLabel} (bebida)`,
+      description: `${payLabel} (bebida)`,
       areaCat: FINANCE_AREA_CATEGORY.buffetDrinkIncome,
       referenceId: `${baseRef}:bebida`,
     });
     await insertPart({
       accountId,
       amount: cupsAmount,
-      description: `${labelPrefix} — ${payLabel} (vasos)`,
+      description: `${payLabel} (vasos)`,
       areaCat: FINANCE_AREA_CATEGORY.buffetCupsIncome,
       referenceId: `${baseRef}:vasos`,
     });
@@ -233,6 +244,22 @@ function formatMpOpeningBalances(raw) {
   return balances.length > 0 ? balances : undefined;
 }
 
+function formatDayEvents(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const events = raw.flatMap((item) => {
+    if (!item || typeof item.id !== "string" || !item.id) return [];
+    const name = String(item.name ?? "").trim();
+    if (!name) return [];
+    return [{
+      id: item.id,
+      name,
+      startTime: item.startTime || undefined,
+      endTime: item.endTime || undefined,
+    }];
+  });
+  return events.length > 0 ? events : undefined;
+}
+
 function formatCashRegister(row) {
   return {
     id: row.id,
@@ -240,6 +267,7 @@ function formatCashRegister(row) {
     mercadoPagoAccountId: row.mercado_pago_account_id,
     eventId: row.event_id || undefined,
     eventName: row.event_name || undefined,
+    dayEvents: formatDayEvents(row.day_events),
     startingCash: row.starting_cash != null ? Number(row.starting_cash) : undefined,
     mpStartingBalance:
       row.mp_starting_balance != null && Number.isFinite(Number(row.mp_starting_balance))
@@ -316,8 +344,6 @@ router.post("/", async (req, res) => {
   try {
     const {
       mercadoPagoAccountId,
-      eventId,
-      eventName,
       startingCash,
       mpStartingBalance,
       mpOpeningBalances,
@@ -330,9 +356,6 @@ router.post("/", async (req, res) => {
       return res.status(400).json({
         error: "La caja debe asociarse a una cuenta de Mercado Pago (no efectivo)",
       });
-    }
-    if (!eventName || !String(eventName).trim()) {
-      return res.status(400).json({ error: "El evento es requerido" });
     }
 
     const existing = await db.query(
@@ -381,21 +404,39 @@ router.post("/", async (req, res) => {
     }
 
     const id = crypto.randomUUID();
-    const now = new Date();
-    const date = now.toISOString().split("T")[0];
+    const date = argentinaDateKey(new Date());
     const client = await db.connect();
 
     try {
       await client.query("BEGIN");
+      const eventsResult = await client.query(
+        `SELECT id, activity_name, start_time, end_time
+         FROM agenda_rentals
+         WHERE type = 'one-off' AND date = $1::date
+         ORDER BY start_time NULLS LAST, activity_name`,
+        [date],
+      );
+      if (eventsResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error: "No se puede abrir la caja: no hay eventos hoy",
+        });
+      }
+      const dayEvents = eventsResult.rows.map((event) => ({
+        id: event.id,
+        name: event.activity_name,
+        startTime: event.start_time || null,
+        endTime: event.end_time || null,
+      }));
       await client.query(
-        `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, starting_cash, mp_starting_balance, mp_opening_balances, status, opening_checklist)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9)`,
+        `INSERT INTO cash_registers (id, date, mercado_pago_account_id, event_id, event_name, day_events, starting_cash, mp_starting_balance, mp_opening_balances, status, opening_checklist)
+         VALUES ($1, $2, $3, NULL, $4, $5, $6, $7, $8, 'open', $9)`,
         [
           id,
           date,
           mercadoPagoAccountId,
-          eventId || null,
-          String(eventName).trim(),
+          dayEvents.map((event) => event.name).join(" · "),
+          JSON.stringify(dayEvents),
           cashNumber,
           mpStartingBalanceDb,
           JSON.stringify(parsedOpening.balances),
@@ -404,7 +445,9 @@ router.post("/", async (req, res) => {
             : null,
         ]
       );
-      await fulfillTicketMenuOrdersForCaja(client, id, eventId || null);
+      for (const event of dayEvents) {
+        await fulfillTicketMenuOrdersForCaja(client, id, event.id);
+      }
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -477,7 +520,9 @@ router.get("/:id", async (req, res) => {
     if (!row) {
       return res.status(404).json({ error: "Caja no encontrada" });
     }
-    res.json(formatCashRegister(row));
+    const formatted = formatCashRegister(row);
+    formatted.staff = await listCashRegisterShifts(db, req.params.id);
+    res.json(formatted);
   } catch (error) {
     console.error("Error fetching cash register:", error);
     res.status(500).json({ error: "Error al obtener la caja" });
@@ -494,7 +539,8 @@ router.patch("/:id/close", async (req, res) => {
     }
 
     const check = await db.query(
-      "SELECT id, status, event_name, event_id FROM cash_registers WHERE id = $1",
+      `SELECT id, status, event_name, event_id, day_events, to_char(date, 'YYYY-MM-DD') AS date
+       FROM cash_registers WHERE id = $1`,
       [id]
     );
     const caja = check.rows[0];
@@ -510,17 +556,56 @@ router.patch("/:id/close", async (req, res) => {
     try {
       await client.query("BEGIN");
       const cupsSummary = await getCupSummaryForCashRegister(client, id);
+      const { staff, ...closingRest } = closingData;
+      const dayEvents = Array.isArray(caja.day_events) ? caja.day_events : [];
+      const events = dayEvents.length > 0
+        ? dayEvents.map((event) => ({
+            id: event.id,
+            name: event.name,
+            startTime: event.startTime,
+            endTime: event.endTime,
+          }))
+        : caja.event_id
+          ? [{ id: caja.event_id, name: caja.event_name || "Evento", startTime: null, endTime: null }]
+          : [];
+      const orders = await client.query(
+        `SELECT o.status, o.total, o.created_at,
+           COALESCE(ic.items_cost, 0) AS cost
+         FROM orders o
+         LEFT JOIN (
+           SELECT order_id, SUM(unit_cost * quantity) AS items_cost
+           FROM order_items
+           GROUP BY order_id
+         ) ic ON ic.order_id = o.id
+         WHERE o.cash_register_id = $1`,
+        [id],
+      );
+      const totalActual = Number(closingRest.totalActual);
+      const eventAllocation = events.length
+        ? allocateCashRegister({
+            cajaDate: caja.date,
+            events,
+            orders: orders.rows.map((order) => ({
+              status: order.status,
+              total: Number(order.total) || 0,
+              cost: Number(order.cost) || 0,
+              createdAt: order.created_at,
+            })),
+            totalIncome: Number.isFinite(totalActual) ? totalActual : undefined,
+          })
+        : [];
       const mergedClosingData = {
-        ...closingData,
+        ...closingRest,
         cupsSummary,
+        ...(eventAllocation.length > 0 ? { eventAllocation } : {}),
       };
       await insertBuffetCloseTransactions(
         client,
         id,
         mergedClosingData,
-        caja.event_name,
-        caja.event_id || null,
+        incomeShares(eventAllocation),
       );
+      await replaceCashRegisterShifts(client, id, caja.date, Array.isArray(staff) ? staff : []);
       await client.query(
         `UPDATE cash_registers
          SET status = 'closed', closed_at = $1, closing_data = $2, kitchen_open = 0

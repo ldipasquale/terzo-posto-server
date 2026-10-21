@@ -324,7 +324,7 @@ const CREATE_TABLES = `
     type TEXT NOT NULL CHECK (type IN ('income', 'expense', 'transfer')),
     amount DOUBLE PRECISION NOT NULL,
     description TEXT NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense')),
+    source TEXT NOT NULL CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense', 'staff')),
     area TEXT,
     category TEXT,
     reference_id TEXT,
@@ -1108,6 +1108,11 @@ async function initDb() {
         'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS kitchen_open SMALLINT NOT NULL DEFAULT 0',
       );
     }
+    if (!cashRegisterColNames.includes('day_events')) {
+      await client.query(
+        'ALTER TABLE cash_registers ADD COLUMN IF NOT EXISTS day_events JSONB',
+      );
+    }
     if (!ordersColNames.includes('cash_register_id')) {
       await client.query(
         'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cash_register_id TEXT REFERENCES cash_registers(id)',
@@ -1703,6 +1708,70 @@ async function initDb() {
     await client.query(`
       ALTER TABLE directorio_todos
       ADD COLUMN IF NOT EXISTS event_id TEXT REFERENCES agenda_rentals(id) ON DELETE SET NULL
+    `);
+
+    await client.query(`
+      ALTER TABLE finance_transactions DROP CONSTRAINT IF EXISTS finance_transactions_source_check
+    `);
+    await client.query(`
+      ALTER TABLE finance_transactions ADD CONSTRAINT finance_transactions_source_check
+      CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense', 'staff'))
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS employees (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        area TEXT NOT NULL CHECK (area IN ('cocina', 'bar', 'limpieza')),
+        jornada_amount DOUBLE PRECISION NOT NULL,
+        hour_amount DOUBLE PRECISION NOT NULL,
+        active SMALLINT NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`
+      ALTER TABLE employees ADD COLUMN IF NOT EXISTS responsible_name TEXT
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS staff_shifts (
+        id TEXT PRIMARY KEY,
+        employee_id TEXT NOT NULL REFERENCES employees(id),
+        date DATE NOT NULL,
+        cash_register_id TEXT REFERENCES cash_registers(id) ON DELETE SET NULL,
+        jornada_hours DOUBLE PRECISION NOT NULL,
+        jornada_amount DOUBLE PRECISION NOT NULL,
+        overtime_hours DOUBLE PRECISION NOT NULL DEFAULT 0,
+        hour_amount DOUBLE PRECISION NOT NULL,
+        overtime_amount DOUBLE PRECISION NOT NULL DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS staff_payments (
+        id TEXT PRIMARY KEY,
+        employee_id TEXT NOT NULL REFERENCES employees(id),
+        amount DOUBLE PRECISION NOT NULL,
+        account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
+        paid_date TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS staff_payment_shifts (
+        payment_id TEXT NOT NULL REFERENCES staff_payments(id) ON DELETE CASCADE,
+        shift_id TEXT NOT NULL REFERENCES staff_shifts(id),
+        PRIMARY KEY (payment_id, shift_id)
+      )
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS staff_payment_shifts_shift_id_idx
+      ON staff_payment_shifts (shift_id)
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS staff_shifts_employee_caja_idx
+      ON staff_shifts (employee_id, cash_register_id)
+      WHERE cash_register_id IS NOT NULL
     `);
 
     await client.query(`
