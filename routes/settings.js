@@ -23,6 +23,11 @@ import {
   getStaffPayDefaults,
   parseMoney,
 } from '../lib/staffPay.js';
+import {
+  WIZ_LIGHTS_SETTINGS_KEY,
+  getWizLights,
+  normalizeWizLights,
+} from '../lib/wizLights.js';
 const router = express.Router();
 
 function emptyToNullText(value) {
@@ -184,6 +189,35 @@ router.put('/venue', async (req, res) => {
   } catch (error) {
     console.error('Error updating venue location:', error);
     res.status(500).json({ error: 'Error al guardar la ubicación' });
+  }
+});
+
+/** Luces WiZ: zonas y escenas. El ESP32 del local es quien habla con las lámparas. */
+router.get('/lights', async (_req, res) => {
+  try {
+    res.json(await getWizLights(db));
+  } catch (error) {
+    console.error('Error fetching wiz lights:', error);
+    res.status(500).json({ error: 'Error al obtener las luces' });
+  }
+});
+
+router.put('/lights', async (req, res) => {
+  try {
+    const normalized = normalizeWizLights(req.body);
+    if (normalized.error) {
+      return res.status(400).json({ error: normalized.error });
+    }
+    await db.query(
+      `INSERT INTO settings (key, value, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP`,
+      [WIZ_LIGHTS_SETTINGS_KEY, JSON.stringify(normalized.data)],
+    );
+    res.json(normalized.data);
+  } catch (error) {
+    console.error('Error updating wiz lights:', error);
+    res.status(500).json({ error: 'Error al guardar las luces' });
   }
 });
 
