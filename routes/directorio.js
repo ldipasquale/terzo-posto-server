@@ -1,8 +1,11 @@
 import crypto from 'crypto';
 import express from 'express';
 import db from '../database.js';
+import documentsRouter from './directorioDocuments.js';
 
 const router = express.Router();
+
+router.use('/documents', documentsRouter);
 
 const PARTNERS = ['Lucho', 'Bachi', 'Luli'];
 const ROCK_STATUSES = ['on-track', 'off-track'];

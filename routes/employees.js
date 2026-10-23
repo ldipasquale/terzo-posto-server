@@ -50,15 +50,38 @@ function dateKey(value) {
 }
 
 async function readShiftBody(body, employee, { requireDate = true } = {}) {
-  const hours = parsePositiveHours(body?.jornadaHours, "Las horas de jornada");
+  const rawHours = body?.jornadaHours;
+  if (rawHours == null || rawHours === "") {
+    return { error: "Las horas de jornada tienen que ser mayor a 0 y hasta 24" };
+  }
+  const hours =
+    Number(rawHours) === 0
+      ? { hours: 0 }
+      : parsePositiveHours(rawHours, "Las horas de jornada");
   if (hours.error) return hours;
   const overtime = parseOptionalHours(body?.overtimeHours);
   if (overtime.error) return overtime;
-  const amount =
-    body?.jornadaAmount == null || body.jornadaAmount === ""
-      ? { amount: jornadaAmountForHours(employee.jornada_amount, hours.hours) }
-      : parseMoney(body.jornadaAmount, "El valor de la jornada");
-  if (amount.error) return amount;
+  if (hours.hours <= 0 && overtime.hours <= 0) {
+    return { error: "Cargá las horas extra" };
+  }
+  const hourAmount = roundMoney(employee.hour_amount);
+  const overtimeAtRate = roundMoney(overtime.hours * Number(employee.hour_amount));
+  let jornadaAmount;
+  let overtimeAmount;
+  if (body?.totalAmount != null && body.totalAmount !== "") {
+    const total = parseMoney(body.totalAmount, "El total");
+    if (total.error) return total;
+    overtimeAmount = roundMoney(Math.min(overtimeAtRate, total.amount));
+    jornadaAmount = roundMoney(total.amount - overtimeAmount);
+  } else {
+    const amount =
+      body?.jornadaAmount == null || body.jornadaAmount === ""
+        ? { amount: jornadaAmountForHours(employee.jornada_amount, hours.hours) }
+        : parseMoney(body.jornadaAmount, "El valor de la jornada");
+    if (amount.error) return amount;
+    jornadaAmount = amount.amount;
+    overtimeAmount = overtimeAtRate;
+  }
   let date;
   if (requireDate || body?.date != null) {
     date = dateKey(body?.date);
@@ -67,10 +90,10 @@ async function readShiftBody(body, employee, { requireDate = true } = {}) {
   return {
     date,
     jornadaHours: hours.hours,
-    jornadaAmount: amount.amount,
+    jornadaAmount,
     overtimeHours: overtime.hours,
-    hourAmount: roundMoney(employee.hour_amount),
-    overtimeAmount: roundMoney(overtime.hours * Number(employee.hour_amount)),
+    hourAmount,
+    overtimeAmount,
   };
 }
 
@@ -323,6 +346,7 @@ router.patch("/:id/shifts/:shiftId", requireFinance, async (req, res) => {
         jornadaHours: req.body?.jornadaHours ?? shift.jornada_hours,
         jornadaAmount: req.body?.jornadaAmount ?? shift.jornada_amount,
         overtimeHours: req.body?.overtimeHours ?? shift.overtime_hours,
+        totalAmount: req.body?.totalAmount,
       },
       employee.rows[0],
     );
