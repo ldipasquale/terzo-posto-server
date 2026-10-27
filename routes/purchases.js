@@ -5,8 +5,11 @@ import db from '../database.js';
 import { FINANCE_AREA_CATEGORY } from '../lib/financeAreas.js';
 import { parsePurchaseTicketImage } from '../lib/parsePurchaseTicketImage.js';
 import { allocatePurchaseNet } from '../lib/purchaseSplit.js';
+import purchaseNoticesRoutes from './purchaseNotices.js';
 
 const router = express.Router();
+
+router.use('/notices', purchaseNoticesRoutes);
 
 const ticketUpload = multer({
   storage: multer.memoryStorage(),

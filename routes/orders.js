@@ -7,6 +7,10 @@ import {
   insertBuffetPayments,
   parseSplitPayments,
 } from '../lib/buffetPayments.js';
+import {
+  consumePortionLimits,
+  restorePortionLimits,
+} from '../lib/portionLimit.js';
 
 const router = express.Router();
 
@@ -652,6 +656,8 @@ router.post('/', async (req, res) => {
         }
       }
 
+      const countedPortionIds = await consumePortionLimits(client, items);
+
       let row = (
         await client.query('SELECT value FROM settings WHERE key = $1', [
           'order_counter',
@@ -716,12 +722,12 @@ router.post('/', async (req, res) => {
                order_id, menu_item_id, name, description, price, category, type,
                quantity, notes, unit_cost, is_delivered, created_at, delivered_at,
                promotion_id, promotion_group_id, promotion_name, promotion_price,
-               promotion_unit_price, promotion_group_cost
+               promotion_unit_price, promotion_group_cost, portion_counted
              )
              VALUES (
                $1, $2, $3, $4, $5, $6, $7,
                $8, $9, $10, $11, CURRENT_TIMESTAMP, NULL,
-               $12, $13, $14, $15, $16, $17
+               $12, $13, $14, $15, $16, $17, $18
              )`,
             [
               orderId,
@@ -747,6 +753,7 @@ router.post('/', async (req, res) => {
               item.promotionGroupId && !deferCostSnapshot
                 ? promotionGroupCostMap.get(item.promotionGroupId) ?? null
                 : null,
+              countedPortionIds.has(item.menuItem.id) ? 1 : 0,
             ],
           );
         }
@@ -954,7 +961,8 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
            promotion_name,
            promotion_price,
            promotion_unit_price,
-           promotion_group_cost
+           promotion_group_cost,
+           portion_counted
          FROM order_items
          WHERE id = $1 AND order_id = $2
          FOR UPDATE`,
@@ -999,10 +1007,11 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
                promotion_name,
                promotion_price,
                promotion_unit_price,
-               promotion_group_cost
+               promotion_group_cost,
+               portion_counted
              ) VALUES (
                $1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10, $11, $12,
-               $13, $14, $15, $16, $17, $18
+               $13, $14, $15, $16, $17, $18, $19
              )`,
             [
               item.order_id,
@@ -1023,6 +1032,7 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
               item.promotion_price ?? null,
               item.promotion_unit_price ?? null,
               item.promotion_group_cost ?? null,
+              item.portion_counted ?? 0,
             ],
           );
         }
@@ -1099,20 +1109,32 @@ router.patch('/:id/items/:itemId/delivered', async (req, res) => {
 
 // Delete order
 router.delete('/:id', async (req, res) => {
+  const client = await db.connect();
   try {
     const id = req.params.id.startsWith('#')
       ? req.params.id
       : `#${req.params.id}`;
-    const result = await db.query('DELETE FROM orders WHERE id = $1', [id]);
+    await client.query('BEGIN');
+    await restorePortionLimits(client, id);
+    const result = await client.query('DELETE FROM orders WHERE id = $1', [id]);
 
     if (result.rowCount === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Pedido no encontrado' });
     }
 
+    await client.query('COMMIT');
     res.status(204).send();
   } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // already aborted
+    }
     console.error('Error deleting order:', error);
     res.status(500).json({ error: 'Error al eliminar el pedido' });
+  } finally {
+    client.release();
   }
 });
 

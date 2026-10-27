@@ -31,6 +31,7 @@ const CREATE_TABLES = `
     instructions TEXT,
     archived SMALLINT NOT NULL DEFAULT 0,
     requires_kitchen SMALLINT NOT NULL DEFAULT 1,
+    portion_limit INTEGER CHECK (portion_limit IS NULL OR portion_limit >= 0),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -133,7 +134,8 @@ const CREATE_TABLES = `
     unit_cost DOUBLE PRECISION,
     is_delivered BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    delivered_at TIMESTAMP
+    delivered_at TIMESTAMP,
+    portion_counted SMALLINT NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS settings (
@@ -199,6 +201,21 @@ const CREATE_TABLES = `
     unit_price_per_unit DOUBLE PRECISION,
     previous_price DOUBLE PRECISION
   );
+
+  CREATE TABLE IF NOT EXISTS purchase_notices (
+    id TEXT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT REFERENCES app_users(id) ON DELETE SET NULL,
+    author_name TEXT NOT NULL,
+    payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
+    mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id) ON DELETE SET NULL,
+    amount DOUBLE PRECISION,
+    note TEXT,
+    image_file TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_purchase_notices_created_at
+    ON purchase_notices (created_at);
 
   CREATE TABLE IF NOT EXISTS agenda_rooms (
     id TEXT PRIMARY KEY,
@@ -585,6 +602,11 @@ async function initDb() {
         'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS instructions TEXT',
       );
     }
+    if (!menuColNames.includes('portion_limit')) {
+      await client.query(
+        'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS portion_limit INTEGER CHECK (portion_limit IS NULL OR portion_limit >= 0)',
+      );
+    }
 
     const orderItemsCols = await client.query(
       "SELECT column_name FROM information_schema.columns WHERE table_name = 'order_items'",
@@ -654,6 +676,11 @@ async function initDb() {
           `ALTER TABLE order_items ADD COLUMN IF NOT EXISTS ${col} ${def}`,
         );
       }
+    }
+    if (!oiColNames.includes('portion_counted')) {
+      await client.query(
+        'ALTER TABLE order_items ADD COLUMN IF NOT EXISTS portion_counted SMALLINT NOT NULL DEFAULT 0',
+      );
     }
     await client.query(`
       UPDATE order_items oi

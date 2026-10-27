@@ -19,6 +19,10 @@ import {
   splitMoney,
 } from "../lib/eventWindowAllocation.js";
 import { listCashRegisterShifts, replaceCashRegisterShifts } from "./employees.js";
+import {
+  clearKitchenPortionLimits,
+  parsePortionLimitMap,
+} from "../lib/portionLimit.js";
 
 const router = express.Router();
 
@@ -612,6 +616,7 @@ router.patch("/:id/close", async (req, res) => {
          WHERE id = $3`,
         [now, JSON.stringify(mergedClosingData), id]
       );
+      await clearKitchenPortionLimits(client);
       await client.query("COMMIT");
     } catch (e) {
       await client.query("ROLLBACK");
@@ -631,7 +636,7 @@ router.patch("/:id/close", async (req, res) => {
   }
 });
 
-async function applyFoodAvailability(client, availableFoodItemIds) {
+async function applyFoodAvailability(client, availableFoodItemIds, portionLimits) {
   if (!Array.isArray(availableFoodItemIds)) {
     const err = new Error("Seleccioná los platos disponibles");
     err.statusCode = 400;
@@ -659,17 +664,33 @@ async function applyFoodAvailability(client, availableFoodItemIds) {
     }
   }
 
-  await client.query(
-    `UPDATE menu_items
-     SET available = 0, updated_at = CURRENT_TIMESTAMP
-     WHERE type = 'comida' AND archived = 0 AND requires_kitchen = 1`,
-  );
-  if (ids.length > 0) {
+  const limitMap = parsePortionLimitMap(portionLimits, ids);
+
+  const clearUnchecked = `UPDATE menu_items
+     SET available = 0,
+         portion_limit = CASE WHEN portion_limit = 0 THEN 0 ELSE NULL END,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE type = 'comida' AND archived = 0 AND requires_kitchen = 1`;
+  if (ids.length === 0) {
+    await client.query(clearUnchecked);
+  } else {
+    await client.query(
+      `${clearUnchecked} AND NOT (id = ANY($1::text[]))`,
+      [ids],
+    );
     await client.query(
       `UPDATE menu_items
-       SET available = 1, updated_at = CURRENT_TIMESTAMP
+       SET available = 1, portion_limit = NULL, updated_at = CURRENT_TIMESTAMP
        WHERE id = ANY($1::text[])`,
       [ids],
+    );
+  }
+  for (const [id, limit] of limitMap) {
+    await client.query(
+      `UPDATE menu_items
+       SET portion_limit = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [id, limit],
     );
   }
 }
@@ -678,7 +699,7 @@ async function applyFoodAvailability(client, availableFoodItemIds) {
 router.patch("/:id/kitchen", async (req, res) => {
   try {
     const { id } = req.params;
-    const { open, availableFoodItemIds } = req.body ?? {};
+    const { open, availableFoodItemIds, portionLimits } = req.body ?? {};
     if (typeof open !== "boolean") {
       return res.status(400).json({ error: "open debe ser true o false" });
     }
@@ -703,7 +724,9 @@ router.patch("/:id/kitchen", async (req, res) => {
         [open ? 1 : 0, id],
       );
       if (open) {
-        await applyFoodAvailability(client, availableFoodItemIds);
+        await applyFoodAvailability(client, availableFoodItemIds, portionLimits);
+      } else {
+        await clearKitchenPortionLimits(client);
       }
       await client.query("COMMIT");
     } catch (e) {

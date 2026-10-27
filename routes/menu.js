@@ -5,7 +5,7 @@ import db from '../database.js';
 const router = express.Router();
 
 const MENU_ITEM_COLUMNS =
-  'id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen';
+  'id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen, portion_limit';
 
 const MAX_INSTRUCTIONS = 50000;
 
@@ -110,6 +110,8 @@ function formatMenuItem(item) {
       (item.requires_kitchen == null
         ? true
         : Boolean(Number(item.requires_kitchen))),
+    portionLimit:
+      item.portion_limit == null ? null : Number(item.portion_limit),
   };
 }
 
@@ -317,6 +319,17 @@ router.put('/:id', async (req, res) => {
           : 1;
     }
 
+    // Re-enabling a dish that sold out clears the zero so it can be sold again.
+    let portionLimit = existing.portion_limit;
+    if (
+      Number(available) === 1 &&
+      Number(existing.available) !== 1 &&
+      existing.portion_limit != null &&
+      Number(existing.portion_limit) === 0
+    ) {
+      portionLimit = null;
+    }
+
     if (type !== 'comida' && type !== 'bebida') {
       return res
         .status(400)
@@ -328,8 +341,8 @@ router.put('/:id', async (req, res) => {
        SET name = $1, description = $2, price = $3, category = $4, type = $5,
            available = $6, popular = $7, portions = $8, recipe = $9,
            production_steps = $10, instructions = $11, archived = $12,
-           requires_kitchen = $13, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $14`,
+           requires_kitchen = $13, portion_limit = $14, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $15`,
       [
         name,
         description,
@@ -344,6 +357,7 @@ router.put('/:id', async (req, res) => {
         instructionsParsed.text,
         archived,
         requiresKitchen,
+        portionLimit,
         req.params.id,
       ],
     );
