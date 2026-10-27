@@ -152,7 +152,7 @@ const CREATE_TABLES = `
     recipe TEXT,
     yield_amount DOUBLE PRECISION,
     yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
-    origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
+    origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'cocina', 'bar', 'general', 'otro')),
     requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE,
     instructions TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -181,7 +181,7 @@ const CREATE_TABLES = `
     total DOUBLE PRECISION NOT NULL DEFAULT 0,
     payment_method TEXT NOT NULL CHECK (payment_method IN ('efectivo', 'mercadopago')),
     mercado_pago_account_id TEXT REFERENCES mercado_pago_accounts(id),
-    category TEXT NOT NULL CHECK (category IN ('comida', 'bebida', 'ambas')),
+    category TEXT NOT NULL CHECK (category IN ('comida', 'bebida', 'limpieza', 'ambas')),
     provider TEXT,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -717,7 +717,7 @@ async function initDb() {
     await client.query(`
       ALTER TABLE buffet_purchases
       ADD CONSTRAINT buffet_purchases_category_check
-      CHECK (category IN ('comida', 'bebida', 'ambas'))
+      CHECK (category IN ('comida', 'bebida', 'limpieza', 'ambas'))
     `);
 
     const mpCols = await client.query(
@@ -1039,7 +1039,7 @@ async function initDb() {
           recipe TEXT,
           yield_amount DOUBLE PRECISION,
           yield_unit TEXT CHECK (yield_unit IS NULL OR yield_unit IN ('g', 'ml', 'unidad')),
-          origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro')),
+          origin TEXT CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'cocina', 'bar', 'general', 'otro')),
           requires_elaboration BOOLEAN NOT NULL DEFAULT TRUE,
           instructions TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1055,7 +1055,7 @@ async function initDb() {
     if (!supplyColNames.includes('origin')) {
       await client.query(`
         ALTER TABLE supplies ADD COLUMN IF NOT EXISTS origin TEXT
-        CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'otro'))
+        CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'cocina', 'bar', 'general', 'otro'))
       `);
     }
     if (!supplyColNames.includes('requires_elaboration')) {
@@ -1070,6 +1070,29 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS instructions TEXT
       `);
     }
+
+    const supplyOriginChecks = await client.query(`
+      SELECT con.conname
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+      WHERE rel.relname = 'supplies'
+        AND con.contype = 'c'
+        AND pg_get_constraintdef(con.oid) ILIKE '%origin%'
+    `);
+    for (const row of supplyOriginChecks.rows) {
+      const name = String(row.conname).replace(/"/g, '""');
+      await client.query(
+        `ALTER TABLE supplies DROP CONSTRAINT IF EXISTS "${name}"`,
+      );
+    }
+    await client.query(
+      `UPDATE supplies SET origin = 'general' WHERE origin = 'limpieza'`,
+    );
+    await client.query(`
+      ALTER TABLE supplies
+      ADD CONSTRAINT supplies_origin_check
+      CHECK (origin IS NULL OR origin IN ('almacen', 'verduleria', 'carniceria', 'bebidas', 'cocina', 'bar', 'general', 'otro'))
+    `);
 
     const cashRegistersExists =
       (

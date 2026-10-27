@@ -4,6 +4,7 @@ import multer from 'multer';
 import db from '../database.js';
 import { FINANCE_AREA_CATEGORY } from '../lib/financeAreas.js';
 import { parsePurchaseTicketImage } from '../lib/parsePurchaseTicketImage.js';
+import { allocatePurchaseNet } from '../lib/purchaseSplit.js';
 
 const router = express.Router();
 
@@ -53,14 +54,6 @@ function mapPurchase(row) {
     notes: row.notes || undefined,
     createdAt: new Date(row.created_at).toISOString(),
   };
-}
-
-function splitPurchaseNet(net, foodSub, drinkSub) {
-  const base = foodSub + drinkSub;
-  if (!(base > 0) || !(drinkSub > 0)) return { food: net, drink: 0 };
-  if (!(foodSub > 0)) return { food: 0, drink: net };
-  const drink = Math.round(((net * drinkSub) / base) * 100) / 100;
-  return { food: Math.round((net - drink) * 100) / 100, drink };
 }
 
 async function insertBuffetExpense(client, expense) {
@@ -165,7 +158,7 @@ router.post('/', async (req, res) => {
     if (!p?.paymentMethod || !['efectivo', 'mercadopago'].includes(p.paymentMethod)) {
       return res.status(400).json({ error: 'Medio de pago inválido' });
     }
-    if (!p?.category || !['comida', 'bebida', 'ambas'].includes(p.category)) {
+    if (!p?.category || !['comida', 'bebida', 'limpieza', 'ambas'].includes(p.category)) {
       return res.status(400).json({ error: 'Categoría inválida' });
     }
 
@@ -256,11 +249,16 @@ router.post('/', async (req, res) => {
       }
       return notes ? `${label} — ${notes}` : label;
     };
-    const singleDesc = provider
-      ? `Compra: ${provider}${notes ? ` — ${notes}` : ''}`
-      : `Compra de insumos${notes ? ` — ${notes}` : ''}`;
+    const singleDesc =
+      p.category === 'limpieza'
+        ? provider
+          ? `Compra de limpieza: ${provider}${notes ? ` — ${notes}` : ''}`
+          : `Compra de limpieza${notes ? ` — ${notes}` : ''}`
+        : provider
+          ? `Compra: ${provider}${notes ? ` — ${notes}` : ''}`
+          : `Compra de insumos${notes ? ` — ${notes}` : ''}`;
     const expenses = [];
-    if (p.category === 'ambas') {
+    if (p.category === 'ambas' || p.category === 'limpieza') {
       const originRows = await client.query(
         'SELECT id, origin FROM supplies WHERE id = ANY($1::text[])',
         [p.items.map((item) => String(item.supplyId))],
@@ -270,12 +268,30 @@ router.post('/', async (req, res) => {
       );
       let foodSub = 0;
       let drinkSub = 0;
+      let kitchenSub = 0;
+      let barSub = 0;
+      let generalSub = 0;
       for (const item of p.items) {
         const line = Number(item.quantity) * Number(item.unitPrice);
-        if (originById.get(String(item.supplyId)) === 'bebidas') drinkSub += line;
-        else foodSub += line;
+        const origin = originById.get(String(item.supplyId));
+        if (origin === 'cocina') kitchenSub += line;
+        else if (origin === 'bar') barSub += line;
+        else if (origin === 'bebidas' && p.category !== 'limpieza') drinkSub += line;
+        else if (
+          p.category === 'limpieza' ||
+          origin === 'general' ||
+          origin === 'limpieza'
+        ) {
+          generalSub += line;
+        } else foodSub += line;
       }
-      const split = splitPurchaseNet(total, foodSub, drinkSub);
+      const split = allocatePurchaseNet(total, [
+        { key: 'drink', sub: drinkSub },
+        { key: 'kitchen', sub: kitchenSub },
+        { key: 'bar', sub: barSub },
+        { key: 'general', sub: generalSub },
+        { key: 'food', sub: foodSub },
+      ]);
       if (split.food > 0) {
         expenses.push({
           amount: split.food,
@@ -290,6 +306,27 @@ router.post('/', async (req, res) => {
           description: labeled('Compra bebidas'),
         });
       }
+      if (split.kitchen > 0) {
+        expenses.push({
+          amount: split.kitchen,
+          areaCat: FINANCE_AREA_CATEGORY.purchaseCleaningKitchen,
+          description: labeled('Limpieza de cocina'),
+        });
+      }
+      if (split.bar > 0) {
+        expenses.push({
+          amount: split.bar,
+          areaCat: FINANCE_AREA_CATEGORY.purchaseCleaningBar,
+          description: labeled('Limpieza de barra'),
+        });
+      }
+      if (split.general > 0) {
+        expenses.push({
+          amount: split.general,
+          areaCat: FINANCE_AREA_CATEGORY.purchaseCleaning,
+          description: labeled('Limpieza general'),
+        });
+      }
     }
     if (expenses.length === 0) {
       expenses.push({
@@ -297,7 +334,9 @@ router.post('/', async (req, res) => {
         areaCat:
           p.category === 'bebida'
             ? FINANCE_AREA_CATEGORY.purchaseDrink
-            : FINANCE_AREA_CATEGORY.purchaseFood,
+            : p.category === 'limpieza'
+              ? FINANCE_AREA_CATEGORY.purchaseCleaning
+              : FINANCE_AREA_CATEGORY.purchaseFood,
         description: singleDesc,
       });
     }

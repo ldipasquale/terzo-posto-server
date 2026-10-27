@@ -5,13 +5,18 @@ import { randomUUID } from 'crypto';
 const router = express.Router();
 
 const VALID_UNITS = ['g', 'ml', 'unidad'];
-const VALID_ORIGINS = ['almacen', 'verduleria', 'carniceria', 'bebidas', 'otro'];
+const VALID_ORIGINS = ['almacen', 'verduleria', 'carniceria', 'bebidas', 'cocina', 'bar', 'general', 'otro'];
+const CLEANING_ORIGINS = new Set(['cocina', 'bar', 'general']);
 
 function parseOrigin(type, origin) {
-  if (type !== 'purchased') return null;
   if (origin == null || origin === '') return null;
-  const value = String(origin).trim().toLowerCase();
+  let value = String(origin).trim().toLowerCase();
+  if (value === 'limpieza') value = 'general';
   if (!VALID_ORIGINS.includes(value)) return undefined;
+  // Un elaborado solo guarda el rubro cuando es bebida o limpieza.
+  if (type !== 'purchased' && value !== 'bebidas' && !CLEANING_ORIGINS.has(value)) {
+    return null;
+  }
   return value;
 }
 
@@ -271,7 +276,7 @@ router.post('/', async (req, res) => {
     const originParsed = parseOrigin(type, origin);
     if (originParsed === undefined) {
       return res.status(400).json({
-        error: 'origin debe ser almacen, verduleria, carniceria, bebidas u otro',
+        error: 'origin debe ser almacen, verduleria, carniceria, bebidas, cocina, bar, general u otro',
       });
     }
 
@@ -416,7 +421,7 @@ router.put('/:id', async (req, res) => {
     const originParsed = parseOrigin(type, origin);
     if (originParsed === undefined) {
       return res.status(400).json({
-        error: 'origin debe ser almacen, verduleria, carniceria, bebidas u otro',
+        error: 'origin debe ser almacen, verduleria, carniceria, bebidas, cocina, bar, general u otro',
       });
     }
 
