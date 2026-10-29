@@ -12,6 +12,7 @@ import {
   receiptExtension,
 } from '../lib/eventTickets.js';
 import {
+  EXPENSE_CATEGORIES,
   FINANCE_AREA_CATEGORY,
   canLinkEventToArea,
   isValidAreaCategory,
@@ -532,7 +533,7 @@ router.put('/transactions/:id', async (req, res) => {
 router.patch('/transactions/:id/classification', async (req, res) => {
   try {
     const existing = await db.query(
-      'SELECT id, type FROM finance_transactions WHERE id = $1',
+      'SELECT id, type, source, reference_id FROM finance_transactions WHERE id = $1',
       [req.params.id],
     );
     const row = existing.rows[0];
@@ -580,6 +581,20 @@ router.patch('/transactions/:id/classification', async (req, res) => {
        WHERE id = $4`,
       [area, category, eventId, req.params.id],
     );
+
+    if (
+      row.source === 'obra' &&
+      row.reference_id &&
+      area === 'obra' &&
+      EXPENSE_CATEGORIES.obra.includes(category)
+    ) {
+      await db.query(
+        `UPDATE obra_purchases
+         SET finance_category = $1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [category, row.reference_id],
+      );
+    }
 
     const updated = await db.query('SELECT * FROM finance_transactions WHERE id = $1', [
       req.params.id,

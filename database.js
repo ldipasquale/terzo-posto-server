@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import pg from 'pg';
 import bcrypt from 'bcryptjs';
 import { ensureRentalSlug } from './lib/eventTickets.js';
+import { seedObraIfEmpty } from './lib/obraSeed.js';
 
 const { Pool } = pg;
 
@@ -341,7 +342,7 @@ const CREATE_TABLES = `
     type TEXT NOT NULL CHECK (type IN ('income', 'expense', 'transfer')),
     amount DOUBLE PRECISION NOT NULL,
     description TEXT NOT NULL,
-    source TEXT NOT NULL CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense', 'staff')),
+    source TEXT NOT NULL CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense', 'staff', 'obra')),
     area TEXT,
     category TEXT,
     reference_id TEXT,
@@ -520,12 +521,82 @@ const CREATE_TABLES = `
 
   CREATE INDEX IF NOT EXISTS social_posts_publish_date_idx
     ON social_posts (publish_date);
+
+  CREATE TABLE IF NOT EXISTS obra_projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS obra_budget_items (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES obra_projects(id) ON DELETE CASCADE,
+    section TEXT NOT NULL,
+    name TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    supplier TEXT NOT NULL DEFAULT '',
+    quantity DOUBLE PRECISION NOT NULL DEFAULT 1,
+    unit_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+    deferred SMALLINT NOT NULL DEFAULT 0,
+    note TEXT NOT NULL DEFAULT '',
+    finance_category TEXT NOT NULL CHECK (
+      finance_category IN ('materiales', 'mano-de-obra', 'equipamiento', 'honorarios')
+    ),
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS obra_tasks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES obra_projects(id) ON DELETE CASCADE,
+    task_number INTEGER,
+    title TEXT NOT NULL,
+    assignee TEXT NOT NULL DEFAULT '',
+    depends_on TEXT NOT NULL DEFAULT '',
+    duration_days INTEGER,
+    week_start INTEGER,
+    week_end INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'done')),
+    note TEXT NOT NULL DEFAULT '',
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS obra_purchases (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES obra_projects(id) ON DELETE CASCADE,
+    budget_item_id TEXT REFERENCES obra_budget_items(id) ON DELETE SET NULL,
+    date TIMESTAMP NOT NULL,
+    supplier TEXT NOT NULL DEFAULT '',
+    amount DOUBLE PRECISION NOT NULL,
+    account_id TEXT NOT NULL REFERENCES mercado_pago_accounts(id),
+    finance_category TEXT NOT NULL CHECK (
+      finance_category IN ('materiales', 'mano-de-obra', 'equipamiento', 'honorarios')
+    ),
+    finance_transaction_id TEXT REFERENCES finance_transactions(id) ON DELETE SET NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
 `;
 
 async function initDb() {
   const client = await pool.connect();
   try {
     await client.query(CREATE_TABLES);
+
+    await client.query(
+      `ALTER TABLE obra_projects ADD COLUMN IF NOT EXISTS end_date DATE`,
+    );
+    await client.query(
+      `UPDATE obra_projects SET end_date = start_date + 34`,
+    );
 
     await client.query(
       `ALTER TABLE directorio_documents
@@ -1785,7 +1856,7 @@ async function initDb() {
     `);
     await client.query(`
       ALTER TABLE finance_transactions ADD CONSTRAINT finance_transactions_source_check
-      CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense', 'staff'))
+      CHECK (source IN ('manual', 'buffet', 'agenda', 'fixed-expense', 'staff', 'obra'))
     `);
 
     await client.query(`
@@ -2016,6 +2087,8 @@ async function initDb() {
         );
       }
     }
+
+    await seedObraIfEmpty(client);
 
     const missingSlugs = await client.query(
       `SELECT * FROM agenda_rentals
