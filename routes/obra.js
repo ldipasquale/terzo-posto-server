@@ -89,6 +89,7 @@ function parseTask(body) {
     status,
     note: String(body?.note || "").trim(),
     taskNumber: taskNumber.value,
+    delegated: Boolean(body?.delegated),
   };
 }
 
@@ -183,6 +184,7 @@ function mapTask(row) {
     weekStart: row.week_start == null ? null : Number(row.week_start),
     weekEnd: row.week_end == null ? null : Number(row.week_end),
     status: row.status,
+    delegated: Number(row.delegated) === 1,
     note: row.note || "",
     position: Number(row.position),
   };
@@ -458,8 +460,8 @@ router.post("/tasks", async (req, res) => {
     const id = crypto.randomUUID();
     await db.query(
       `INSERT INTO obra_tasks
-       (id, project_id, task_number, title, assignee, depends_on, duration_days, week_start, week_end, status, note, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+       (id, project_id, task_number, title, assignee, depends_on, duration_days, week_start, week_end, status, note, delegated, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         id,
         project.id,
@@ -472,6 +474,7 @@ router.post("/tasks", async (req, res) => {
         parsed.weekEnd,
         parsed.status,
         parsed.note,
+        parsed.delegated ? 1 : 0,
         position.rows[0].next,
       ],
     );
@@ -557,8 +560,9 @@ router.put("/tasks/:id", async (req, res) => {
            week_end = $7,
            status = $8,
            note = $9,
+           delegated = $10,
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $10`,
+       WHERE id = $11`,
       [
         parsed.taskNumber,
         parsed.title,
@@ -569,6 +573,7 @@ router.put("/tasks/:id", async (req, res) => {
         parsed.weekEnd,
         parsed.status,
         parsed.note,
+        parsed.delegated ? 1 : 0,
         req.params.id,
       ],
     );

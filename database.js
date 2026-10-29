@@ -562,6 +562,7 @@ const CREATE_TABLES = `
     week_start INTEGER,
     week_end INTEGER,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'done')),
+    delegated SMALLINT NOT NULL DEFAULT 0,
     note TEXT NOT NULL DEFAULT '',
     position INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -596,6 +597,9 @@ async function initDb() {
     );
     await client.query(
       `UPDATE obra_projects SET end_date = start_date + 34`,
+    );
+    await client.query(
+      `ALTER TABLE obra_tasks ADD COLUMN IF NOT EXISTS delegated SMALLINT NOT NULL DEFAULT 0`,
     );
 
     await client.query(
