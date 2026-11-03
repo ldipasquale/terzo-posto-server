@@ -217,10 +217,26 @@ async function loadProject(client = db) {
   return result.rows[0] || null;
 }
 
+async function loadAccounts() {
+  const result = await db.query(
+    `SELECT id, holder, kind FROM mercado_pago_accounts
+     WHERE active = 1 OR id = 'efectivo'
+     ORDER BY CASE WHEN kind = 'cash' OR id = 'efectivo' THEN 0 ELSE 1 END, created_at ASC`,
+  );
+  return result.rows.map((row) => {
+    const isCash = row.kind === "cash" || row.id === "efectivo";
+    return {
+      id: row.id,
+      name: isCash ? "Efectivo" : row.holder,
+      type: isCash ? "cash" : "partner",
+    };
+  });
+}
+
 async function loadSnapshot() {
   const project = await loadProject();
   if (!project) return null;
-  const [items, tasks, purchases] = await Promise.all([
+  const [items, tasks, purchases, accounts] = await Promise.all([
     db.query(
       `SELECT * FROM obra_budget_items
        WHERE project_id = $1
@@ -241,6 +257,7 @@ async function loadSnapshot() {
        ORDER BY p.date DESC, p.created_at DESC`,
       [project.id],
     ),
+    loadAccounts(),
   ]);
   const spentByItem = new Map();
   for (const row of purchases.rows) {
@@ -255,6 +272,7 @@ async function loadSnapshot() {
     items: items.rows.map((row) => mapItem(row, spentByItem.get(row.id) || 0)),
     tasks: tasks.rows.map(mapTask),
     purchases: purchases.rows.map(mapPurchase),
+    accounts,
   };
 }
 

@@ -224,9 +224,9 @@ async function findOpenPendingBeeperOrder(
 /**
  * GET /orders
  * Query: forCashRegisterPeriod=true limits orders to those whose cash_register_id
- * belongs to a cash register opened in the given dateFrom/dateTo window (same as
- * GET /cash-registers). Does not filter by order created_at. Otherwise dateFrom/dateTo
- * apply to orders.created_at.
+ * belongs to a cash register whose opening day (cash_registers.date) falls in
+ * dateFrom/dateTo (same as GET /cash-registers). Does not filter by order created_at.
+ * Otherwise dateFrom/dateTo apply to orders.created_at.
  */
 router.get('/', async (req, res) => {
   try {
@@ -269,13 +269,11 @@ router.get('/', async (req, res) => {
       const crWhere = [];
       const crParams = [];
       if (dateFrom) {
-        crWhere.push(`cr.created_at >= $${crParams.length + 1}::timestamp`);
+        crWhere.push(`cr.date >= $${crParams.length + 1}::date`);
         crParams.push(dateFrom);
       }
       if (dateTo) {
-        crWhere.push(
-          `cr.created_at < ($${crParams.length + 1}::timestamp::date + interval '1 day')`,
-        );
+        crWhere.push(`cr.date <= $${crParams.length + 1}::date`);
         crParams.push(dateTo);
       }
       const crSql =

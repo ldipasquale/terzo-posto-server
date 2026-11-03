@@ -124,7 +124,7 @@ app.use('/api/directorio', authenticateToken, directorioRoutes);
 app.use(
   '/api/obra',
   authenticateToken,
-  requireAnyPermission(PERMISSIONS.FINANZAS),
+  requireAnyPermission(PERMISSIONS.OBRA, PERMISSIONS.FINANZAS),
   obraRoutes,
 );
 app.use('/api/instagram', authenticateToken, instagramRoutes);

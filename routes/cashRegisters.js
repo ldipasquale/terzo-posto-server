@@ -77,7 +77,7 @@ async function getCupSummaryForCashRegister(client, cashRegisterId) {
 /**
  * Ingresos del cierre: por cada medio de pago, tres movimientos (comida/bebida/vasos).
  * Vasos = neto fijo (fuera del %); el resto se reparte comida/bebida según comandas.
- * reference_id: caja-close:<id>:efectivo|mp:<mpId>:comida|bebida|vasos
+ * reference_id: caja-close:<id>:efectivo|mp:<mpId>:comida|bebida|vasos:<eventId|dia>
  */
 async function insertBuffetCloseTransactions(
   client,
@@ -264,10 +264,21 @@ function formatDayEvents(raw) {
   return events.length > 0 ? events : undefined;
 }
 
+function formatDateOnly(value) {
+  if (typeof value === "string") return value.slice(0, 10);
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+  return value;
+}
+
 function formatCashRegister(row) {
   return {
     id: row.id,
-    date: row.date,
+    date: formatDateOnly(row.date),
     mercadoPagoAccountId: row.mercado_pago_account_id,
     eventId: row.event_id || undefined,
     eventName: row.event_name || undefined,
@@ -288,31 +299,21 @@ function formatCashRegister(row) {
 }
 
 // GET /api/cash-registers — list with optional dateFrom, dateTo
-// Incluye cajas abiertas en el rango (created_at) o cerradas en el rango (closed_at),
-// para que el historial / gráficos vean cierres aunque se hubieran abierto antes.
+// El período es el día en que se abrió la caja (columna date, calendario de Argentina),
+// aunque el cierre haya quedado en el día siguiente.
 router.get("/", async (req, res) => {
   try {
     const { dateFrom, dateTo } = req.query;
     const whereClauses = [];
     const params = [];
     let n = 1;
-    if (dateFrom && dateTo) {
-      whereClauses.push(`(
-        (created_at >= $${n}::timestamp AND created_at < ($${n + 1}::timestamp::date + interval '1 day'))
-        OR
-        (closed_at IS NOT NULL AND closed_at >= $${n}::timestamp AND closed_at < ($${n + 1}::timestamp::date + interval '1 day'))
-      )`);
-      params.push(dateFrom, dateTo);
-      n += 2;
-    } else {
-      if (dateFrom) {
-        whereClauses.push(`created_at >= $${n++}::timestamp`);
-        params.push(dateFrom);
-      }
-      if (dateTo) {
-        whereClauses.push(`created_at < ($${n++}::timestamp::date + interval '1 day')`);
-        params.push(dateTo);
-      }
+    if (dateFrom) {
+      whereClauses.push(`date >= $${n++}::date`);
+      params.push(dateFrom);
+    }
+    if (dateTo) {
+      whereClauses.push(`date <= $${n++}::date`);
+      params.push(dateTo);
     }
     const where = whereClauses.length ? "WHERE " + whereClauses.join(" AND ") : "";
     const result = await db.query(
