@@ -101,6 +101,17 @@ function emptyToNullText(value) {
   return t === '' ? null : t;
 }
 
+const DEFAULT_TICKET_BG = '#00234A';
+const DEFAULT_TICKET_ACCENT = '#FD7333';
+
+/** null = color de Terzo. undefined = hex inválido. */
+function parseTicketColor(value, brandDefault) {
+  if (value == null || String(value).trim() === '') return null;
+  const hex = String(value).trim().toUpperCase();
+  if (!/^#[0-9A-F]{6}$/.test(hex)) return undefined;
+  return hex === brandDefault ? null : hex;
+}
+
 function emptyToNullCount(value) {
   if (value == null || value === '') return null;
   const n = Number(value);
@@ -155,6 +166,10 @@ const mapRental = (row) => ({
   transferAlias: row.transfer_alias || undefined,
   transferHolder: row.transfer_holder || undefined,
   eventDescription: row.event_description || undefined,
+  ticketListingMode:
+    row.ticket_listing_mode === 'inscripcion' ? 'inscripcion' : 'entradas',
+  ticketBgColor: row.ticket_bg_color || undefined,
+  ticketAccentColor: row.ticket_accent_color || undefined,
   ticketPrice: row.ticket_price != null ? Number(row.ticket_price) : undefined,
   revenueSharePercent:
     row.revenue_share_percent != null
@@ -441,6 +456,17 @@ router.post('/rentals', async (req, res) => {
     if (roomId === 'full-venue') {
       await ensureFullVenueRoom(db);
     }
+    const ticketBgColor = parseTicketColor(r.ticketBgColor, DEFAULT_TICKET_BG);
+    const ticketAccentColor = parseTicketColor(
+      r.ticketAccentColor,
+      DEFAULT_TICKET_ACCENT,
+    );
+    if (ticketBgColor === undefined) {
+      return res.status(400).json({ error: 'Color de fondo inválido' });
+    }
+    if (ticketAccentColor === undefined) {
+      return res.status(400).json({ error: 'Color de acento inválido' });
+    }
     const id = crypto.randomUUID();
     await db.query(
       `INSERT INTO agenda_rentals (
@@ -448,13 +474,15 @@ router.post('/rentals', async (req, res) => {
         schedules, price_per_hour, start_month, end_month, event_type, date, start_time, end_time,
         fixed_price, consumption_credit, has_tickets, ticket_price, revenue_share_percent, room_insurance_price, date_slots,
         staff_count, staff_food, staff_drinks, event_timeline, technical_needs,
-        transfer_alias, transfer_holder, event_description, has_entradas, responsible_name
+        transfer_alias, transfer_holder, event_description, has_entradas, responsible_name,
+        ticket_listing_mode, ticket_bg_color, ticket_accent_color
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8,
         $9, $10, $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22, $23,
-        $24, $25, $26, $27, $28, $29, $30, $31, $32, $33
+        $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34,
+        $35, $36
       )`,
       [
         id,
@@ -490,6 +518,9 @@ router.post('/rentals', async (req, res) => {
         emptyToNullText(r.eventDescription),
         r.hasEntradas == null ? null : r.hasEntradas ? 1 : 0,
         responsibleName,
+        r.ticketListingMode === 'inscripcion' ? 'inscripcion' : 'entradas',
+        ticketBgColor,
+        ticketAccentColor,
       ],
     );
     const created = await db.query(
@@ -560,6 +591,29 @@ router.put('/rentals/:id', async (req, res) => {
       'eventDescription',
       emptyToNullText,
     );
+    let listingModeField = { present: false, value: null };
+    if (Object.prototype.hasOwnProperty.call(r, 'ticketListingMode')) {
+      if (r.ticketListingMode !== 'entradas' && r.ticketListingMode !== 'inscripcion') {
+        return res.status(400).json({ error: 'Modo de ticketera inválido' });
+      }
+      listingModeField = { present: true, value: r.ticketListingMode };
+    }
+    let ticketBgField = { present: false, value: null };
+    if (Object.prototype.hasOwnProperty.call(r, 'ticketBgColor')) {
+      const parsed = parseTicketColor(r.ticketBgColor, DEFAULT_TICKET_BG);
+      if (parsed === undefined) {
+        return res.status(400).json({ error: 'Color de fondo inválido' });
+      }
+      ticketBgField = { present: true, value: parsed };
+    }
+    let ticketAccentField = { present: false, value: null };
+    if (Object.prototype.hasOwnProperty.call(r, 'ticketAccentColor')) {
+      const parsed = parseTicketColor(r.ticketAccentColor, DEFAULT_TICKET_ACCENT);
+      if (parsed === undefined) {
+        return res.status(400).json({ error: 'Color de acento inválido' });
+      }
+      ticketAccentField = { present: true, value: parsed };
+    }
     let responsibleNameField = { present: false, value: null };
     if (Object.prototype.hasOwnProperty.call(r, 'responsibleName')) {
       const parsed = parseResponsibleName(r.responsibleName);
@@ -600,6 +654,9 @@ router.put('/rentals/:id', async (req, res) => {
         transfer_alias = CASE WHEN $36::boolean THEN $35 ELSE transfer_alias END,
         transfer_holder = CASE WHEN $38::boolean THEN $37 ELSE transfer_holder END,
         event_description = CASE WHEN $40::boolean THEN $39 ELSE event_description END,
+        ticket_listing_mode = CASE WHEN $47::boolean THEN $46 ELSE ticket_listing_mode END,
+        ticket_bg_color = CASE WHEN $49::boolean THEN $48 ELSE ticket_bg_color END,
+        ticket_accent_color = CASE WHEN $51::boolean THEN $50 ELSE ticket_accent_color END,
         has_entradas = COALESCE($41, has_entradas),
         responsible_name = CASE WHEN $43::boolean THEN $42 ELSE responsible_name END,
         prepaid_goods_cost = CASE WHEN $45::boolean THEN $44 ELSE prepaid_goods_cost END,
@@ -651,6 +708,12 @@ router.put('/rentals/:id', async (req, res) => {
         responsibleNameField.present,
         prepaidGoodsCostField.value,
         prepaidGoodsCostField.present,
+        listingModeField.value,
+        listingModeField.present,
+        ticketBgField.value,
+        ticketBgField.present,
+        ticketAccentField.value,
+        ticketAccentField.present,
       ],
     );
     if (result.rowCount === 0)

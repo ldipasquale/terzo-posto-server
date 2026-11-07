@@ -9,6 +9,7 @@ import {
   isReceiptFileName,
   isPublicEventPast,
   isReasonableArPhone,
+  isRegistrationMode,
   allocatePromoDiscount,
   findEventTicketPromo,
   loadCatalog,
@@ -17,6 +18,7 @@ import {
   newId,
   promoDiscountAmount,
   phoneDigits,
+  phoneMatchSql,
   receiptExtension,
   receiptsDir,
   todayYmdBuenosAires,
@@ -33,6 +35,7 @@ import {
   insertTicketMenuSelections,
   parseTicketMenuSelections,
   resolveTicketMenuSelections,
+  revertPendingTicketMenuOrder,
 } from '../lib/ticketMenu.js';
 
 const router = express.Router();
@@ -87,6 +90,10 @@ function mapRecoveredTicket(row) {
     receipt_url: "",
     status: row.status,
     purchase_date: new Date(row.purchase_date).toISOString(),
+    checked_in_at: row.checked_in_at
+      ? new Date(row.checked_in_at).toISOString()
+      : null,
+    checked_in_count: Number(row.checked_in_count) || 0,
   };
 }
 
@@ -116,6 +123,9 @@ function mapPublicListing(row) {
     flyer_url: row.flyer_file ? `/api/public/flyers/${row.flyer_file}` : null,
     from_price: row.from_price == null ? null : Number(row.from_price),
     sold_out: row.sold_out === true,
+    listing_mode: row.ticket_listing_mode === 'inscripcion' ? 'inscripcion' : 'entradas',
+    bg_color: row.ticket_bg_color || null,
+    accent_color: row.ticket_accent_color || null,
   };
 }
 
@@ -134,6 +144,9 @@ router.get('/events', async (req, res) => {
            r.event_type,
            r.event_description,
            r.flyer_file,
+           r.ticket_listing_mode,
+           r.ticket_bg_color,
+           r.ticket_accent_color,
            MIN(tt.price) FILTER (
              WHERE tt.available_quantity > COALESCE(sold.sold, 0)
            ) AS from_price,
@@ -214,44 +227,51 @@ router.post('/events/:slug/tickets/lookup', async (req, res) => {
   try {
     const email = String(req.body?.email || '').trim().toLowerCase();
     const phone = String(req.body?.phone || '').trim();
-    if (!isValidEmail(email) || !isReasonableArPhone(phone)) {
-      return res.status(400).json({
-        error: 'Ingresá el mail y el teléfono de la compra',
-      });
-    }
-
     const rentalResult = await db.query(
-      'SELECT id FROM agenda_rentals WHERE slug = $1 AND has_tickets = 1',
+      'SELECT id, ticket_listing_mode FROM agenda_rentals WHERE slug = $1 AND has_tickets = 1',
       [req.params.slug],
     );
     const rental = rentalResult.rows[0];
     if (!rental) {
       return res.status(404).json({ error: 'Evento no encontrado' });
     }
+    const registration = isRegistrationMode(rental);
+    if (registration) {
+      if (!isReasonableArPhone(phone)) {
+        return res.status(400).json({ error: 'Ingresá tu teléfono' });
+      }
+    } else if (!isValidEmail(email) || !isReasonableArPhone(phone)) {
+      return res.status(400).json({
+        error: 'Ingresá el mail y el teléfono de la compra',
+      });
+    }
 
     const digits = phoneDigits(phone);
     const found = await db.query(
-      `SELECT t.*, tt.name AS ticket_type_name
-       FROM event_tickets t
-       JOIN event_ticket_types tt ON tt.id = t.ticket_type_id
-       WHERE t.rental_id = $1
-         AND t.status <> 'rejected'
-         AND lower(t.buyer_email) = $2
-         AND (
-           regexp_replace(t.buyer_phone, '[^0-9]', '', 'g') = $3
-           OR (
-             length(regexp_replace(t.buyer_phone, '[^0-9]', '', 'g')) >= 8
-             AND right(regexp_replace(t.buyer_phone, '[^0-9]', '', 'g'), 10)
-               = right($3, 10)
-           )
-         )
-       ORDER BY t.purchase_date DESC`,
-      [rental.id, email, digits],
+      registration
+        ? `SELECT t.*, tt.name AS ticket_type_name
+           FROM event_tickets t
+           JOIN event_ticket_types tt ON tt.id = t.ticket_type_id
+           WHERE t.rental_id = $1
+             AND t.status <> 'rejected'
+             AND ${phoneMatchSql('t.buyer_phone', '$2')}
+           ORDER BY t.purchase_date DESC`
+        : `SELECT t.*, tt.name AS ticket_type_name
+           FROM event_tickets t
+           JOIN event_ticket_types tt ON tt.id = t.ticket_type_id
+           WHERE t.rental_id = $1
+             AND t.status <> 'rejected'
+             AND lower(t.buyer_email) = $2
+             AND ${phoneMatchSql('t.buyer_phone', '$3')}
+           ORDER BY t.purchase_date DESC`,
+      registration ? [rental.id, digits] : [rental.id, email, digits],
     );
 
     if (found.rowCount === 0) {
       return res.status(404).json({
-        error: 'No encontramos una entrada con esos datos',
+        error: registration
+          ? 'No encontramos una anotación con ese teléfono'
+          : 'No encontramos una entrada con esos datos',
       });
     }
 
@@ -276,12 +296,11 @@ router.post('/events/:slug/tickets', (req, res) => {
       if (parsedLines.error) {
         return res.status(400).json({ error: parsedLines.error });
       }
-      if (
-        !buyerName ||
-        !isReasonableArPhone(buyerPhone) ||
-        !isValidEmail(buyerEmail)
-      ) {
+      if (!buyerName || !isReasonableArPhone(buyerPhone)) {
         return res.status(400).json({ error: 'Datos del comprador inválidos' });
+      }
+      if (buyerEmail && !isValidEmail(buyerEmail)) {
+        return res.status(400).json({ error: 'Revisá el email' });
       }
       const lines = parsedLines.lines;
 
@@ -295,11 +314,38 @@ router.post('/events/:slug/tickets', (req, res) => {
         await client.query('ROLLBACK');
         return res.status(404).json({ error: 'Evento no encontrado' });
       }
+      const registration = isRegistrationMode(rental);
+      if (!registration && !isValidEmail(buyerEmail)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Datos del comprador inválidos' });
+      }
+      if (registration && (lines.length !== 1 || lines[0].quantity !== 1)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Anotate de a una persona' });
+      }
       if (rental.ticket_sales_closed_at || isPublicEventPast(rental.date)) {
         await client.query('ROLLBACK');
         return res.status(409).json({
-          error: 'La venta de entradas para este evento ya cerró',
+          error: registration
+            ? 'La inscripción para este evento ya cerró'
+            : 'La venta de entradas para este evento ya cerró',
         });
+      }
+      if (registration) {
+        const duplicate = await client.query(
+          `SELECT 1 FROM event_tickets t
+           WHERE t.rental_id = $1
+             AND t.status <> 'rejected'
+             AND ${phoneMatchSql('t.buyer_phone', '$2')}
+           LIMIT 1`,
+          [rental.id, phoneDigits(buyerPhone)],
+        );
+        if (duplicate.rowCount > 0) {
+          await client.query('ROLLBACK');
+          return res.status(409).json({
+            error: 'Este teléfono ya está anotado',
+          });
+        }
       }
 
       const typeIds = lines.map((line) => line.ticketTypeId).sort();
@@ -321,11 +367,17 @@ router.post('/events/:slug/tickets', (req, res) => {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: parsedMenu.error });
       }
-      const resolvedMenu = await resolveTicketMenuSelections(
-        client,
-        rental.id,
-        parsedMenu.items,
-      );
+      if (registration && parsedMenu.items.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Esta anotación no lleva menú' });
+      }
+      const resolvedMenu = registration
+        ? { total: 0, selections: [] }
+        : await resolveTicketMenuSelections(
+            client,
+            rental.id,
+            parsedMenu.items,
+          );
       if (resolvedMenu.error) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: resolvedMenu.error });
@@ -348,7 +400,9 @@ router.post('/events/:slug/tickets', (req, res) => {
         if (line.quantity > remaining) {
           await client.query('ROLLBACK');
           return res.status(409).json({
-            error: `No hay cupo suficiente para ${type.name}`,
+            error: registration
+              ? 'No quedan lugares'
+              : `No hay cupo suficiente para ${type.name}`,
           });
         }
         pricedLines.push({
@@ -414,7 +468,7 @@ router.post('/events/:slug/tickets', (req, res) => {
             discountShares[index] || 0,
             buyerName,
             buyerPhone,
-            buyerEmail,
+            buyerEmail || null,
             receiptFile,
             isFree ? 'approved' : 'pending',
             purchaseId,
@@ -454,11 +508,74 @@ router.post('/events/:slug/tickets', (req, res) => {
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('public ticket:', error);
-      res.status(500).json({ error: 'Error al registrar la compra' });
+      res.status(500).json({ error: 'No se pudo completar la compra' });
     } finally {
       client.release();
     }
   });
+});
+
+router.post('/events/:slug/registrations/cancel', async (req, res) => {
+  const phone = String(req.body?.phone || '').trim();
+  if (!isReasonableArPhone(phone)) {
+    return res.status(400).json({ error: 'Ingresá tu teléfono' });
+  }
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const rentalResult = await client.query(
+      'SELECT * FROM agenda_rentals WHERE slug = $1 FOR UPDATE',
+      [req.params.slug],
+    );
+    const rental = rentalResult.rows[0];
+    if (!rental || Number(rental.has_tickets) !== 1 || !isRegistrationMode(rental)) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Evento no encontrado' });
+    }
+    const found = await client.query(
+      `SELECT t.*
+       FROM event_tickets t
+       WHERE t.rental_id = $1
+         AND t.status <> 'rejected'
+         AND ${phoneMatchSql('t.buyer_phone', '$2')}
+       ORDER BY t.purchase_date DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [rental.id, phoneDigits(phone)],
+    );
+    const ticket = found.rows[0];
+    if (!ticket) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        error: 'No encontramos una anotación con ese teléfono',
+      });
+    }
+    if (ticket.checked_in_at || Number(ticket.checked_in_count) > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({
+        error: 'Ya figurás como presente',
+      });
+    }
+    const updated = await client.query(
+      `UPDATE event_tickets
+       SET status = 'rejected'
+       WHERE id = $1
+       RETURNING *`,
+      [ticket.id],
+    );
+    await revertPendingTicketMenuOrder(client, ticket.id);
+    await client.query('COMMIT');
+    res.json({
+      ok: true,
+      buyer_name: updated.rows[0]?.buyer_name || ticket.buyer_name,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('cancel registration:', error);
+    res.status(500).json({ error: 'No se pudo liberar el lugar' });
+  } finally {
+    client.release();
+  }
 });
 
 router.get('/flyers/:fileId', (req, res) => {

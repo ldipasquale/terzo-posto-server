@@ -263,6 +263,9 @@ const CREATE_TABLES = `
     transfer_alias TEXT,
     transfer_holder TEXT,
     event_description TEXT,
+    ticket_listing_mode TEXT NOT NULL DEFAULT 'entradas',
+    ticket_bg_color TEXT,
+    ticket_accent_color TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   );
@@ -1367,6 +1370,25 @@ async function initDb() {
     `);
     await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS event_description TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals
+      ADD COLUMN IF NOT EXISTS ticket_listing_mode TEXT NOT NULL DEFAULT 'entradas';
+    `);
+    await client.query(`
+      DO $$ BEGIN
+        ALTER TABLE agenda_rentals
+          ADD CONSTRAINT agenda_rentals_ticket_listing_mode_check
+          CHECK (ticket_listing_mode IN ('entradas', 'inscripcion'));
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS ticket_bg_color TEXT;
+    `);
+    await client.query(`
+      ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS ticket_accent_color TEXT;
     `);
     await client.query(`
       ALTER TABLE agenda_rentals ADD COLUMN IF NOT EXISTS has_entradas SMALLINT;
