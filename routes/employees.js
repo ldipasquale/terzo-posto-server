@@ -149,7 +149,7 @@ router.get("/payments", requireFinance, async (req, res) => {
   }
 });
 
-router.post("/", requireFinance, async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     const name = String(req.body?.name ?? "").trim();
     const area = req.body?.area;

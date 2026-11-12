@@ -198,40 +198,43 @@ function formatOpeningChecklist(raw) {
 }
 
 function parseMpOpeningBalances(raw, activeIds, selectedAccountId) {
-  if (!Array.isArray(raw)) {
-    return { error: "Hay que cargar el saldo inicial de cada cuenta de Mercado Pago" };
-  }
   if (activeIds.length === 0) {
     return { error: "No hay cuentas de Mercado Pago activas" };
+  }
+  if (!activeIds.includes(selectedAccountId)) {
+    return { error: "Elegí la cuenta de Mercado Pago del día" };
+  }
+  if (!Array.isArray(raw)) {
+    return { error: "Cargá el saldo inicial de la cuenta del día" };
   }
   const byId = new Map();
   for (const item of raw) {
     const accountId = item?.accountId;
     const startingBalance = Number(item?.startingBalance);
     if (typeof accountId !== "string" || !accountId) {
-      return { error: "Hay que cargar el saldo inicial de cada cuenta de Mercado Pago" };
+      return { error: "Cargá el saldo inicial de la cuenta del día" };
     }
     if (byId.has(accountId)) {
       return { error: "Hay una cuenta de Mercado Pago repetida" };
+    }
+    if (!activeIds.includes(accountId)) {
+      return { error: "La cuenta de Mercado Pago no está activa" };
     }
     if (!Number.isFinite(startingBalance) || startingBalance < 0) {
       return { error: "El saldo inicial tiene que ser un número mayor o igual a 0" };
     }
     byId.set(accountId, startingBalance);
   }
-  const missing = activeIds.filter((id) => !byId.has(id));
-  const extra = [...byId.keys()].filter((id) => !activeIds.includes(id));
-  if (missing.length > 0 || extra.length > 0) {
-    return { error: "Hay que cargar el saldo inicial de cada cuenta activa" };
-  }
   if (!byId.has(selectedAccountId)) {
-    return { error: "Elegí la cuenta de Mercado Pago del día" };
+    return { error: "Cargá el saldo inicial de la cuenta del día" };
   }
   return {
-    balances: activeIds.map((accountId) => ({
-      accountId,
-      startingBalance: byId.get(accountId),
-    })),
+    balances: [
+      {
+        accountId: selectedAccountId,
+        startingBalance: byId.get(selectedAccountId),
+      },
+    ],
     selectedBalance: byId.get(selectedAccountId),
   };
 }
