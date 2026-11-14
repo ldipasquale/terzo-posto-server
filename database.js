@@ -32,6 +32,7 @@ const CREATE_TABLES = `
     instructions TEXT,
     archived SMALLINT NOT NULL DEFAULT 0,
     requires_kitchen SMALLINT NOT NULL DEFAULT 1,
+    requires_production SMALLINT NOT NULL DEFAULT 0,
     portion_limit INTEGER CHECK (portion_limit IS NULL OR portion_limit >= 0),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -673,6 +674,11 @@ async function initDb() {
     if (!menuColNames.includes('requires_kitchen')) {
       await client.query(
         'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS requires_kitchen SMALLINT NOT NULL DEFAULT 1',
+      );
+    }
+    if (!menuColNames.includes('requires_production')) {
+      await client.query(
+        'ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS requires_production SMALLINT NOT NULL DEFAULT 0',
       );
     }
     if (!menuColNames.includes('instructions')) {

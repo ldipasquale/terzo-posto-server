@@ -5,7 +5,11 @@ import db from '../database.js';
 const router = express.Router();
 
 const MENU_ITEM_COLUMNS =
-  'id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen, portion_limit';
+  'id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen, requires_production, portion_limit';
+
+function canRequireProduction(type, category) {
+  return type === 'bebida' || category === 'Postres';
+}
 
 const MAX_INSTRUCTIONS = 50000;
 
@@ -110,6 +114,9 @@ function formatMenuItem(item) {
       (item.requires_kitchen == null
         ? true
         : Boolean(Number(item.requires_kitchen))),
+    requiresProduction:
+      canRequireProduction(item.type, item.category) &&
+      Boolean(Number(item.requires_production)),
     portionLimit:
       item.portion_limit == null ? null : Number(item.portion_limit),
   };
@@ -175,6 +182,7 @@ router.post('/', async (req, res) => {
       instructions,
       archived,
       requiresKitchen: requiresKitchenBody,
+      requiresProduction: requiresProductionBody,
     } = req.body;
 
     if (!id || !name || price === undefined || !category || !type) {
@@ -202,10 +210,14 @@ router.post('/', async (req, res) => {
       typeof portions === 'number' && portions >= 1 ? portions : 1;
     const requiresKitchen =
       type === 'comida' ? (requiresKitchenBody === false ? 0 : 1) : 0;
+    const requiresProduction =
+      canRequireProduction(type, category) && requiresProductionBody === true
+        ? 1
+        : 0;
 
     await db.query(
-      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      `INSERT INTO menu_items (id, name, description, price, category, type, available, popular, portions, recipe, production_steps, instructions, archived, requires_kitchen, requires_production)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         id,
         name,
@@ -221,6 +233,7 @@ router.post('/', async (req, res) => {
         instructionsParsed.text,
         archived ? 1 : 0,
         requiresKitchen,
+        requiresProduction,
       ],
     );
 
@@ -286,6 +299,15 @@ router.put('/:id', async (req, res) => {
             ? 1
             : existing.requires_kitchen
         : 0;
+    const requiresProduction = canRequireProduction(type, category)
+      ? body.requiresProduction !== undefined
+        ? body.requiresProduction
+          ? 1
+          : 0
+        : existing.requires_production == null
+          ? 0
+          : existing.requires_production
+      : 0;
 
     let recipeJson = existing.recipe;
     if (body.recipe !== undefined) {
@@ -341,8 +363,9 @@ router.put('/:id', async (req, res) => {
        SET name = $1, description = $2, price = $3, category = $4, type = $5,
            available = $6, popular = $7, portions = $8, recipe = $9,
            production_steps = $10, instructions = $11, archived = $12,
-           requires_kitchen = $13, portion_limit = $14, updated_at = CURRENT_TIMESTAMP
-       WHERE id = $15`,
+           requires_kitchen = $13, portion_limit = $14, requires_production = $15,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $16`,
       [
         name,
         description,
@@ -358,6 +381,7 @@ router.put('/:id', async (req, res) => {
         archived,
         requiresKitchen,
         portionLimit,
+        requiresProduction,
         req.params.id,
       ],
     );
